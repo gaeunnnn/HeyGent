@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { useParams } from 'react-router'
+import { useParams, useNavigate, useLocation } from 'react-router'
 import { Loader2 } from 'lucide-react'
 import { OfficeMap } from '@/components/office/OfficeMap'
 import { CeoActionMenu } from '@/components/office/CeoActionMenu'
@@ -24,6 +24,7 @@ import type {
 } from '@/components/office/types'
 import { useVisualizationSync } from '@/hooks/useVisualizationSync'
 import { useAgentInfoSync } from '@/hooks/useAgentInfoSync'
+import { useBuildingMappingStore } from '@/store/useBuildingMappingStore'
 
 const ACTIVITY_STATUS_LABEL: Record<AgentActivityStatus, string> = {
   spawning: '진입 중',
@@ -1098,6 +1099,17 @@ export function AgentStatusPage() {
   // 명령하기 다이얼로그 열림 여부 — 라디얼 메뉴에서 "명령하기" 선택 시 true
   const [commandDialogOpen, setCommandDialogOpen] = useState(false)
 
+  // 층 이동 — 건물 매핑 기반
+  const navigate = useNavigate()
+  const location = useLocation()
+  const mappingsByFloor = useBuildingMappingStore((s) => s.mappingsByFloor)
+  const fetchMappings = useBuildingMappingStore((s) => s.fetchMappings)
+  const [floorNavHovered, setFloorNavHovered] = useState(false)
+
+  useEffect(() => {
+    void fetchMappings()
+  }, [fetchMappings])
+
   // [디버깅용 임시] store 노출
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -1260,6 +1272,13 @@ export function AgentStatusPage() {
   const profileIdMap = useMemo<Record<string, string>>(() => {
     return buildProfileIdSpriteMap(agentPanels)
   }, [agentPanels])
+
+  const currentFloor = useMemo(() => {
+    for (const [floor, sid] of Object.entries(mappingsByFloor)) {
+      if (sid === sessionId) return Number(floor)
+    }
+    return null
+  }, [mappingsByFloor, sessionId])
 
   // 세션의 모든 에이전트가 준비되면 한 번에 spawn 한다.
   // - listSessionAgents 응답 완료 (agentsLoaded=true)
@@ -1901,6 +1920,16 @@ export function AgentStatusPage() {
     })
   }
 
+  const handleFloorNavigate = (floor: number) => {
+    const targetSessionId = mappingsByFloor[floor]
+    if (!targetSessionId || targetSessionId === sessionId) return
+    if (location.pathname.startsWith('/session/')) {
+      navigate(`/session/${targetSessionId}/workspace/visualization`)
+    } else {
+      navigate(`/agent-status/${targetSessionId}`)
+    }
+  }
+
   const selectedInfo = selectedAgentId ? agentInfoMap[selectedAgentId] : null
 
   const isInitializing = !agentsLoaded || navmeshGrid === null
@@ -1967,6 +1996,97 @@ export function AgentStatusPage() {
       {selectedInfo && <AgentInfoPanel info={selectedInfo} onClose={() => selectAgent(null)} />}
       {tokenModalOpen && tokenUsageSummary && (
         <TokenUsageModal summary={tokenUsageSummary} onClose={() => setTokenModalOpen(false)} />
+      )}
+      {/* 층 이동 버튼 — 엘리베이터 옆 우측 */}
+      {Object.keys(mappingsByFloor).length > 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '28%',
+            right: '2%',
+            zIndex: 20,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 4,
+          }}
+          onMouseEnter={() => setFloorNavHovered(true)}
+          onMouseLeave={() => setFloorNavHovered(false)}
+        >
+          {/* 항상 보이는 트리거 버튼 */}
+          <button
+            style={{
+              width: 34,
+              height: 22,
+              borderRadius: 6,
+              border: '1px solid rgba(255,255,255,0.15)',
+              background: floorNavHovered ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.55)',
+              color: 'rgba(255,255,255,0.5)',
+              fontSize: 9,
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              cursor: 'default',
+              backdropFilter: 'blur(8px)',
+              transition: 'background 0.15s ease',
+            }}
+          >
+            층이동
+          </button>
+          {/* 호버 시 아래로 나타나는 층 버튼 */}
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 3,
+              opacity: floorNavHovered ? 1 : 0,
+              transform: floorNavHovered ? 'translateY(0)' : 'translateY(-6px)',
+              pointerEvents: floorNavHovered ? 'auto' : 'none',
+              transition: 'opacity 0.18s ease, transform 0.18s ease',
+            }}
+          >
+            {([3, 2, 1] as const).map((floor) => {
+              const mapped = mappingsByFloor[floor]
+              const isCurrent = currentFloor === floor
+              const hasSession = !!mapped
+              return (
+                <button
+                  key={floor}
+                  disabled={!hasSession || isCurrent}
+                  onClick={() => handleFloorNavigate(floor)}
+                  style={{
+                    width: 34,
+                    height: 28,
+                    borderRadius: 6,
+                    border: isCurrent
+                      ? '1px solid rgba(129,140,248,0.8)'
+                      : hasSession
+                        ? '1px solid rgba(255,255,255,0.18)'
+                        : '1px solid rgba(255,255,255,0.06)',
+                    background: isCurrent
+                      ? 'rgba(99,102,241,0.75)'
+                      : hasSession
+                        ? 'rgba(0,0,0,0.65)'
+                        : 'rgba(0,0,0,0.4)',
+                    color: isCurrent
+                      ? 'white'
+                      : hasSession
+                        ? 'rgba(255,255,255,0.8)'
+                        : 'rgba(255,255,255,0.2)',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    cursor: hasSession && !isCurrent ? 'pointer' : 'default',
+                    boxShadow: isCurrent ? '0 0 10px rgba(99,102,241,0.5)' : 'none',
+                    backdropFilter: 'blur(8px)',
+                    transition: 'background 0.12s ease',
+                  }}
+                >
+                  {floor}F
+                </button>
+              )
+            })}
+          </div>
+        </div>
       )}
     </div>
   )
