@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router'
 import {
   Building2,
@@ -85,7 +85,6 @@ export function LeftSidebar() {
   const [newSessionModalOpen, setNewSessionModalOpen] = useState(false)
   const [newSessionCreating, setNewSessionCreating] = useState(false)
   const [newSessionError, setNewSessionError] = useState<string | null>(null)
-  const commandClient = useAiRealtimeStore((state) => state.commandClient)
   const realtimeStatus = useAiRealtimeStore((state) => state.connectionStatus)
   const sessionsById = useChatStore((state) => state.sessionsById)
   const messagesBySessionId = useChatStore((state) => state.messagesBySessionId)
@@ -108,13 +107,8 @@ export function LeftSidebar() {
     return [...pinned, ...unpinned]
   }, [messagesBySessionId, pinnedSessionIds, sessionsById, taskRunsById])
 
-  useEffect(() => {
-    if (commandClient === null) {
-      return
-    }
-
-    void fetchSessions().catch(() => undefined)
-  }, [commandClient, fetchSessions])
+  // fetchSessions 호출은 AiRealtimeProvider 의 auth.ok 핸들러가 단독으로 담당.
+  // LeftSidebar 에서 또 호출하면 같은 명령이 2회 발사돼 사이드바 로드가 두 배 느려진다.
 
   const createDefaultAgentSession = (config: CustomAgentConfig) => {
     setNewSessionCreating(true)
