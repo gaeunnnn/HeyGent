@@ -633,6 +633,10 @@ class LocalToolRuntime:
 
     def _create_prototype_artifact(self, args: dict[str, Any]) -> dict[str, Any]:
         from app.tools.prototype.prototype_tool import normalize_prototype_files, prototype_tool_error
+        from app.tools.prototype.prototype_validation import (
+            validate_prototype_preview_files,
+            validation_issues_payload,
+        )
 
         if self.prototype_repository is None:
             return prototype_tool_error("prototype_repository_unavailable", "prototype artifact storage is not configured.")
@@ -667,6 +671,16 @@ class LocalToolRuntime:
                 "design_preset_required",
                 "DESIGN.md prototype creation requires designPresetId. Call design.list_presets, "
                 "read one preset with design.read_preset, then retry with that exact preset_id.",
+            )
+        validation_issues = validate_prototype_preview_files(files, entry_file=entry_file, framework=framework)
+        if validation_issues:
+            issues_payload = validation_issues_payload(validation_issues)
+            issue_summary = "; ".join(issue["message"] for issue in issues_payload[:3])
+            return prototype_tool_error(
+                "prototype_validation_failed",
+                "Prototype preview validation failed before saving. Fix the files and call "
+                f"prototype.create_artifact again. {issue_summary}",
+                details={"issues": issues_payload},
             )
         summary = self._optional_text(args.get("summary")) or "프로토타입 버전을 생성했습니다."
         metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}

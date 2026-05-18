@@ -132,7 +132,7 @@ def normalize_prototype_files(value: Any) -> dict[str, dict[str, str]]:
     return files
 
 
-def prototype_tool_error(code: str, message: str) -> dict[str, Any]:
+def prototype_tool_error(code: str, message: str, *, details: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {
         "error": {
             "code": code,
@@ -140,6 +140,8 @@ def prototype_tool_error(code: str, message: str) -> dict[str, Any]:
             "tool_name": "prototype.create_artifact",
         }
     }
+    if details:
+        payload["error"]["details"] = details
     return {
         "ok": False,
         **payload,
