@@ -1027,6 +1027,12 @@ async def _dispatch_work_wake(request: Request, *, user, wake):
     if work is None:
         return repository.complete_work_wake(wake.wake_id, status="skipped", last_error="work not found")
     if work.active_run_id:
+        if getattr(wake, "reason", None) in {"blockers_resolved", "children_completed"}:
+            return repository.complete_work_wake(
+                wake.wake_id,
+                status="skipped",
+                last_error="work already has an active run; wake coalesced",
+            )
         if int(getattr(wake, "attempts", 0) or 0) < MAX_WAKE_ATTEMPTS:
             return repository.complete_work_wake(
                 wake.wake_id,
@@ -1035,6 +1041,12 @@ async def _dispatch_work_wake(request: Request, *, user, wake):
                 retry_delay_seconds=30,
             )
         return repository.complete_work_wake(wake.wake_id, status="skipped", last_error="work already has an active run")
+    if _work_advanced_after_wake(work, wake):
+        return repository.complete_work_wake(
+            wake.wake_id,
+            status="skipped",
+            last_error="work already advanced after wake was queued",
+        )
     if work.status not in {"todo", "in_progress", "in_review", "blocked"}:
         return repository.complete_work_wake(wake.wake_id, status="skipped", last_error=f"work status is {work.status}")
     unresolved = service.unresolved_blocker_work_ids(work.work_id)
@@ -1071,6 +1083,24 @@ async def _dispatch_work_wake(request: Request, *, user, wake):
         return repository.complete_work_wake(wake.wake_id, status="failed", last_error=str(error))
     # wake는 실행 요청을 만든 뒤 끝난다. 실제 완료/실패 판정은 연결된 WorkRun이 담당한다.
     return repository.complete_work_wake(wake.wake_id, status="dispatched", task_run_id=message.task_run_id)
+
+
+def _work_advanced_after_wake(work: WorkItem, wake) -> bool:
+    if getattr(wake, "reason", None) not in {"blockers_resolved", "children_completed"}:
+        return False
+    latest_run_id = getattr(work, "latest_run_id", None)
+    if not latest_run_id:
+        return False
+    if latest_run_id == getattr(wake, "requested_by_task_run_id", None):
+        return False
+    work_updated_at = getattr(work, "updated_at", None)
+    wake_created_at = getattr(wake, "created_at", None)
+    if work_updated_at is None or wake_created_at is None:
+        return False
+    try:
+        return work_updated_at > wake_created_at
+    except TypeError:
+        return False
 
 
 def _user_for_work_wake(work: WorkItem, session: dict[str, Any]):

@@ -75,7 +75,7 @@ def send_mattermost_message_handler(args: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
-        with urlopen(request, timeout=settings.backend_memory_timeout_seconds) as response:
+        with urlopen(request, timeout=settings.backend_tool_timeout_seconds) as response:
             body = response.read(100_000).decode("utf-8", errors="replace")
     except HTTPError as error:
         return _tool_error("backend_request_failed", _backend_error_message(error))

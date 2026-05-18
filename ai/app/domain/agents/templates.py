@@ -22,6 +22,7 @@ MAIN_AGENT_TEMPLATE_KEY = "ceo"
 DEFAULT_SESSION_TEMPLATE_KEYS = ("coder", "qa", "ux_designer", "k_services")
 LEGACY_AGENT_SKILL_IDS = frozenset(("code", "browser"))
 K_SERVICE_SKILL_IDS = (
+    "srt-booking",
     "korea-weather",
     "fine-dust-location",
     "han-river-water-level",
@@ -134,7 +135,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
         title="General Agent",
         description="특정 전문 에이전트가 없는 일반 요청을 맡아 세션 맥락 기반 조사, 요약, 자료 정리, 실행 보조, 간단한 문서화와 후속 작업 정리를 수행합니다.",
         adapter_type="openai",
-        model="gpt-5.4",
+        model="gpt-5.2",
         profile_image="/assets/agents/agent01/idle_front.png",
         skills=("skill-index",),
         documents=(
@@ -164,7 +165,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
         title="한국 생활 정보 담당",
         description="한국 생활/공공정보 요청을 맡습니다. 날씨, 미세먼지, 한강 수위, 지하철 도착 정보, 지하철역/열차 유실물, 주소/우편번호, 공공화장실, 생활폐기물, 학교 급식, 도서관, 유가, 로또, 부동산 실거래가, 한국어 글자 수 같은 조회와 안내를 처리합니다.",
         adapter_type="openai",
-        model="gpt-5.4",
+        model="gpt-5.2",
         profile_image="/assets/agents/agent06/idle_front.png",
         skills=K_SERVICE_SKILL_IDS,
         documents=(
@@ -178,6 +179,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
 ## 할 수 있는 일
 
 - 한국 날씨, 미세먼지, 한강 수위 같은 생활 날씨 정보를 확인합니다.
+- SRT 열차 조회, 예약 내역 확인, 예약/취소 준비를 처리합니다.
 - 서울 지하철 도착 정보와 지하철 유실물 찾기 흐름을 정리합니다.
 - 우편번호, 도로명주소, 공공 화장실, 생활 폐기물, 급식, 도서관, 로또, 유가, 부동산 실거래가처럼 한국 생활 정보 조회를 맡습니다.
 - 사용자가 준 단서가 부족하면 필요한 최소 정보만 묻고, 충분한 단서가 있으면 바로 실행합니다.
@@ -187,6 +189,33 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
 - 공식 경로, 검색 조건, 다음 행동을 구분해서 짧게 정리합니다.
 - 시간, 장소, 물품명처럼 사용자가 준 단서는 누락하지 않습니다.
 - 조회가 불가능하거나 안내형 범위인 경우에는 가능한 공식 진입점과 사용자가 직접 확인할 항목을 남깁니다.
+
+## 인증 정보
+
+- SRT처럼 계정 정보가 필요한 skill은 `SECRETS.md`의 해당 섹션을 기준으로 필요한 항목을 확인합니다.
+- `SECRETS.md`에 `<stored>`로 표시된 값은 저장된 값이 있다는 뜻이며, 원문 비밀번호나 토큰을 채팅이나 결과에 다시 쓰지 않습니다.
+- 필요한 인증 정보가 비어 있으면 어떤 항목이 필요한지만 말하고, 비밀번호 원문을 대화 본문에 적게 하지 않습니다.
+""",
+            ),
+            (
+                "SECRETS.md",
+                "비밀값 입력",
+                """# 비밀값 입력
+
+이 문서는 계정 정보나 API 키처럼 skill 실행에 필요한 값을 입력하는 공간입니다. 저장 시 자동으로 암호화 저장됩니다.
+
+서버가 원문 값을 암호화하여 저장합니다. 저장 후에는 입력한 값이 다시 노출되지 않습니다.
+
+필수값이 모두 저장되면 섹션 제목 옆에 `(암호화 저장 완료)`가 표시됩니다. 하나라도 비어 있으면 완료 표시가 사라집니다.
+
+더 이상 필요하지 않은 값은 빈칸으로 비워 두세요.
+
+## srt-booking
+
+# KSKILL_SRT_ID에는 SRT 회원번호, 이메일, 휴대전화번호 중 하나를 입력합니다.
+# 휴대전화번호는 010-1234-5678처럼 하이픈 포함 형식을 권장합니다.
+KSKILL_SRT_ID=
+KSKILL_SRT_PASSWORD=
 """,
             ),
         ),
@@ -199,7 +228,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
         title="Software Engineer",
         description="소프트웨어 개발 요청을 맡습니다. 코드 구현, 버그 원인 분석, 리팩터링, 테스트 작성과 실행, 프론트엔드/백엔드 수정, 개발 환경 확인, 변경 요약과 인수인계를 처리합니다.",
         adapter_type="openai",
-        model="gpt-5.4",
+        model="gpt-5.2",
         profile_image="/assets/agents/agent03/idle_front.png",
         skills=("subagent-driven-development", "writing-plans", "awesome-design"),
         documents=(
@@ -237,7 +266,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
         title="QA Engineer",
         description="품질 검증 요청을 맡습니다. 버그 재현, 수정 확인, 화면 흐름 테스트, 로그/오류 확인, 검증 리포트와 재현 단계를 정리합니다.",
         adapter_type="openai",
-        model="gpt-5.4",
+        model="gpt-5.2",
         profile_image="/assets/agents/agent04/idle_front.png",
         skills=(),
         documents=(
@@ -277,7 +306,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
         title="UX Designer",
         description="제품 경험 검토를 맡습니다. 사용자 흐름, 정보 구조, 화면 위계, 상태 표시, 빈 화면/오류/로딩, 버튼과 입력 상호작용, 사용자 문구와 접근성 문제를 점검합니다.",
         adapter_type="openai",
-        model="gpt-5.4",
+        model="gpt-5.2",
         profile_image="/assets/agents/agent05/idle_front.png",
         skills=("awesome-design",),
         documents=(
@@ -313,7 +342,7 @@ BUILTIN_AGENT_TEMPLATES: tuple[BuiltinAgentTemplate, ...] = (
         title="Security Engineer",
         description="보안 검토 요청을 맡습니다. 인증, 권한, 세션 접근, 비밀값과 토큰 노출, 입력 검증, 경로/명령 주입, 외부 도구 실행 위험, 에이전트 위임 권한 문제를 점검합니다.",
         adapter_type="openai",
-        model="gpt-5.4",
+        model="gpt-5.2",
         profile_image="/assets/agents/agent02/idle_front.png",
         skills=(),
         documents=(

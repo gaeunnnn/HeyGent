@@ -9,6 +9,7 @@ metadata:
       - web-search-fallback
       - parallel-cli
       - korea-weather
+      - srt-booking
       - joseon-sillok-search
       - library-book-search
       - household-waste-info
@@ -58,6 +59,7 @@ Read `mattermost-send` when the user explicitly asks to send, share, post, or pu
 Read a skill under `k-skills` when the request is about Korean public data, Korean local information, Korean services, or Korean text utilities.
 
 - `korea-weather`: Korean weather forecast by location or coordinates.
+- `srt-booking`: SRT train availability, reservation inspection, booking, cancellation, and sold-out retry guidance through SRTrain.
 - `fine-dust-location`: Korean fine dust and air quality by region.
 - `han-river-water-level`: Han River water level by station.
 - `seoul-subway-arrival`: Seoul subway real-time arrival information.

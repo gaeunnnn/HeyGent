@@ -42,7 +42,7 @@ class OpenAiCredentialIssueServiceTest {
     void setUp() {
         OpenAiProperties properties = new OpenAiProperties();
         properties.setApiKey("dev-key");
-        properties.setAllowedModels(List.of("gpt-5.4"));
+        properties.setAllowedModels(List.of("gpt-5.4", "gpt-5.4-mini", "gpt-5.2"));
         OpenAiRuntimePolicyService runtimePolicyService = new OpenAiRuntimePolicyService(properties, environment);
         openAiCredentialIssueService = new OpenAiCredentialIssueService(
             properties,
@@ -62,6 +62,18 @@ class OpenAiCredentialIssueServiceTest {
         assertThat(response.getProviderName()).isEqualTo("openai_api_key");
         assertThat(response.getCredentialType()).isEqualTo("api_key");
         assertThat(response.getCredential()).isEqualTo("user-key");
+        verify(openAiApiKeyService).resolveApiKey(eq(1L), any());
+    }
+
+    @Test
+    void issueAllowsGpt52ForUserApiKeyCredential() throws Exception {
+        OpenAiCredentialIssueRequest request = request("openai_api_key", "gpt-5.2");
+        when(openAiApiKeyService.resolveApiKey(eq(1L), any())).thenReturn("user-key");
+
+        OpenAiCredentialIssueResponse response = openAiCredentialIssueService.issue(request);
+
+        assertThat(response.getProviderName()).isEqualTo("openai_api_key");
+        assertThat(response.getModel()).isEqualTo("gpt-5.2");
         verify(openAiApiKeyService).resolveApiKey(eq(1L), any());
     }
 
