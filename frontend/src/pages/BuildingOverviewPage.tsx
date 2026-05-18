@@ -336,7 +336,7 @@ export function BuildingOverviewPage() {
           }}
         />
 
-        {/* 빈 층 어두운 오버레이 + 매핑된 층 에이전트 스프라이트 */}
+        {/* 매핑된 층의 에이전트 스프라이트 — 빈 층은 spriteIdsForFloor 가 [] 라 아무도 안 돌아다님 */}
         {FLOORS.map((floor) => {
           const sessionId = mappingsByFloor[floor.floor]
           const isEmpty = sessionId === undefined
@@ -383,10 +383,7 @@ export function BuildingOverviewPage() {
           )
         })}
 
-        {/* 빈 층의 "불 꺼진 사무실" 오버레이.
-            새 이미지 에셋을 만들지 않고 기존 building_overview.png 를 그대로 한 번 더 깔되,
-            층 폴리곤으로 마스킹 + brightness/saturate 필터를 걸어 진짜 야간/꺼진 느낌을 낸다.
-            그 위에 살짝 푸른 야간 색조를 합성한다. */}
+        {/* 호버 outline 용 SVG — 빈 층도 기존 이미지 그대로 두고, 에이전트만 안 돌아다니게 한다. */}
         <svg
           viewBox={`0 0 ${IMG_W} ${IMG_H}`}
           style={{
@@ -397,45 +394,7 @@ export function BuildingOverviewPage() {
             pointerEvents: 'none',
           }}
         >
-          <defs>
-            {FLOORS.map((floor) => (
-              <clipPath key={`clip-${floor.floor}`} id={`floor-clip-${floor.floor}`}>
-                <polygon points={floor.svgPoints} />
-              </clipPath>
-            ))}
-          </defs>
-          {FLOORS.map((floor) => {
-            const sessionId = mappingsByFloor[floor.floor]
-            const isEmpty = sessionId === undefined
-            if (!isEmpty) return null
-            return (
-              <g key={`dark-${floor.floor}`}>
-                {/* clipPath 로 영역 마스킹 + 같은 위치에 원본 이미지를 다시 깔고 어둡게 합성.
-                    별도 이미지 에셋 없이 "불 꺼진 사무실" 표현. */}
-                <g clipPath={`url(#floor-clip-${floor.floor})`}>
-                  <image
-                    href="/assets/maps/building_overview.png"
-                    width={IMG_W}
-                    height={IMG_H}
-                    style={{ filter: 'brightness(0.18) saturate(0.4)' }}
-                  />
-                  <rect width={IMG_W} height={IMG_H} fill="rgba(15, 25, 50, 0.55)" />
-                </g>
-                {/* 클립된 영역의 가장자리 안티앨리어싱 틈을 메우기 위해
-                    동일 폴리곤을 어두운 합성색과 같은 톤으로 살짝 stroke 한다 (얇게 — 인공 테두리로 안 보이게). */}
-                <polygon
-                  points={floor.svgPoints}
-                  fill="none"
-                  stroke="rgba(7, 13, 30, 0.85)"
-                  strokeWidth={2}
-                  strokeLinejoin="miter"
-                />
-              </g>
-            )
-          })}
-
-          {/* 호버 시 층 경계선 — 어두운 합성 영역과 동일한 polygon 모양 (사다리꼴) 으로 그린다.
-              직사각형 div boxShadow 대신 실제 유리창 모양과 일치시키기 위함. 색은 빈/매핑 상태에 따라 다르게. */}
+          {/* 호버 시 층 경계선 — 실제 유리창 모양(사다리꼴)과 동일한 polygon. 색은 빈/매핑 상태에 따라 다르게. */}
           {FLOORS.map((floor) => {
             if (hoveredFloor !== floor.floor) return null
             const sessionId = mappingsByFloor[floor.floor]

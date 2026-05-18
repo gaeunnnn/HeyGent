@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useAgentVisualizationStore } from '@/store/useAgentVisualizationStore'
 import { useTaskRunStore } from '@/store/useTaskRunStore'
 import type { UIDestination } from '@/components/office/types'
 import type { RawTaskRun, TaskRunAgentRef } from '@/types/taskRuns'
@@ -132,6 +133,19 @@ export function useVisualizationSync(
 
   const taskRunsById = useTaskRunStore((s) => s.taskRunsById)
   const eventsByTaskRunId = useTaskRunStore((s) => s.eventsByTaskRunId)
+  // sitting_desk 에 stuck 된 에이전트가 생기면 effect 가 한 번 더 돌아 rest 발사하도록 deps 에 포함.
+  const stuckAtDeskKey = useAgentVisualizationStore((s) =>
+    s.agentRuntimes
+      .filter(
+        (a) =>
+          a.config.id !== 'ceo' &&
+          (a.state === 'sitting_desk' ||
+            (a.state === 'walking' && a.targetState === 'sitting_desk')),
+      )
+      .map((a) => a.config.id)
+      .sort()
+      .join(','),
+  )
   const lastDestByAgentId = useRef<Record<string, UIDestination>>({})
 
   useEffect(() => {
@@ -172,10 +186,54 @@ export function useVisualizationSync(
       }
     }
 
-    for (const [profileKey, { destination }] of Object.entries(pendingMoves)) {
-      if (lastDestByAgentId.current[profileKey] === destination) continue
-      lastDestByAgentId.current[profileKey] = destination
-      handleMoveRef.current(profileKey, destination)
+    {
+      const runtimes = useAgentVisualizationStore.getState().agentRuntimes
+      for (const [profileKey, { destination }] of Object.entries(pendingMoves)) {
+        // 이미 같은 명령 보냈고, 실제 state 도 그 명령과 호환되면 skip — 그렇지 않으면 강제로 재발사.
+        // 예: destination='rest' 인데 lastDest='rest' 면 보통 skip 하지만 runtime.state 가 여전히
+        // 'sitting_desk' 면 어딘가 막혀서 일어나지 못한 것이므로 한 번 더 시도한다.
+        if (lastDestByAgentId.current[profileKey] === destination) {
+          if (destination === 'rest') {
+            const runtime = runtimes.find((r) => r.config.id === profileKey)
+            const stuckAtDesk =
+              runtime &&
+              (runtime.state === 'sitting_desk' ||
+                (runtime.state === 'walking' && runtime.targetState === 'sitting_desk'))
+            if (!stuckAtDesk) continue
+          } else {
+            continue
+          }
+        }
+        lastDestByAgentId.current[profileKey] = destination
+        handleMoveRef.current(profileKey, destination)
+      }
     }
-  }, [taskRunsById, eventsByTaskRunId, sessionId, profileIdMap])
+
+    // 진행 중 task 가 없는데 책상에 박혀 있는 서브에이전트 = 휴식 보내기.
+    // backend 의 active task 목록에서 빠지면 위 loop 에 들어오지 않아 마지막 명령(보통 'desk')에 박힘.
+    // 가드:
+    //   - profileIdMap 이 비어있으면(초기 진입 직후) 발사 금지
+    //   - CEO 는 별도 정책으로 움직이므로 제외
+    //   - 아직 runtime 에 spawn 안 된 에이전트는 제외 (지금 rest 보내면 handleMove 의 자동 spawn 분기가
+    //     'sitting_desk' targetState 로 박아 넣어 오히려 stuck 의 원인이 됨)
+    //   - 이미 sitting_sofa/floor_lean 등으로 쉬는 중이면 한 번 더 보낼 필요 없음 — sitting_desk 일 때만 발사
+    if (profileIdMap !== undefined) {
+      const runtimes = useAgentVisualizationStore.getState().agentRuntimes
+      for (const spriteKey of Object.values(profileIdMap)) {
+        if (!spriteKey || spriteKey === 'ceo') continue
+        if (pendingMoves[spriteKey] !== undefined) continue
+        const runtime = runtimes.find((r) => r.config.id === spriteKey)
+        if (!runtime) continue
+        // lastDest === 'rest' 라도 실제 state 가 sitting_desk 면 발사 — 메인 루프에서
+        // 이전에 rest 를 보냈는데 어떤 이유로 위치 전환이 안 됐을 수 있음 (handleMove 의 early-return 분기 등).
+        // sitting_desk 또는 sitting_desk 로 가는 walking 만 대상.
+        const isAtDesk =
+          runtime.state === 'sitting_desk' ||
+          (runtime.state === 'walking' && runtime.targetState === 'sitting_desk')
+        if (!isAtDesk) continue
+        lastDestByAgentId.current[spriteKey] = 'rest'
+        handleMoveRef.current(spriteKey, 'rest')
+      }
+    }
+  }, [taskRunsById, eventsByTaskRunId, sessionId, profileIdMap, stuckAtDeskKey])
 }
