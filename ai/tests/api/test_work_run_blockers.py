@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
 from app.api.http.work import (
     _enqueue_comment_followup_wake,
@@ -154,6 +155,60 @@ async def test_active_work_wake_retries_instead_of_skipping_immediately():
                 "status": "scheduled_retry",
                 "last_error": "work already has an active run",
                 "retry_delay_seconds": 30,
+            },
+        )
+    ]
+
+
+async def test_blocker_resolved_wake_coalesces_when_work_is_already_running():
+    repository = FakeWakeRepository(work_item=SimpleNamespace(active_run_id="task-active"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(work_repository=repository)))
+    wake = SimpleNamespace(wake_id="wake-1", work_id="work-1", attempts=1, reason="blockers_resolved")
+
+    result = await _dispatch_work_wake(request, user=None, wake=wake)
+
+    assert result.status == "skipped"
+    assert repository.completed == [
+        (
+            "wake-1",
+            {
+                "status": "skipped",
+                "last_error": "work already has an active run; wake coalesced",
+            },
+        )
+    ]
+
+
+async def test_blocker_resolved_wake_skips_when_work_advanced_after_wake_was_queued():
+    wake_created_at = datetime(2026, 5, 18, 6, 17, tzinfo=timezone.utc)
+    repository = FakeWakeRepository(
+        work_item=SimpleNamespace(
+            active_run_id=None,
+            latest_run_id="task-parent-after-wake",
+            updated_at=wake_created_at + timedelta(seconds=10),
+            status="in_review",
+            work_id="work-1",
+        )
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(work_repository=repository)))
+    wake = SimpleNamespace(
+        wake_id="wake-1",
+        work_id="work-1",
+        attempts=2,
+        reason="blockers_resolved",
+        requested_by_task_run_id="task-child",
+        created_at=wake_created_at,
+    )
+
+    result = await _dispatch_work_wake(request, user=None, wake=wake)
+
+    assert result.status == "skipped"
+    assert repository.completed == [
+        (
+            "wake-1",
+            {
+                "status": "skipped",
+                "last_error": "work already advanced after wake was queued",
             },
         )
     ]

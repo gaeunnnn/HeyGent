@@ -221,7 +221,7 @@ def _patch_app_runtime(app_main, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_main, "connect_postgres", lambda _dsn: None)
     monkeypatch.setattr(app_main, "PostgresTaskRepository", lambda _connection_factory: InMemoryTaskRepository())
     monkeypatch.setattr(app_main, "PostgresSessionStore", lambda _connection_factory: InMemoryTranscriptStore())
-    monkeypatch.setattr(app_main, "PostgresAgentRepository", lambda _connection_factory: InMemoryAgentRepository())
+    monkeypatch.setattr(app_main, "PostgresAgentRepository", lambda _connection_factory, **_kwargs: InMemoryAgentRepository())
     monkeypatch.setattr(app_main, "PostgresPrototypeArtifactRepository", lambda _connection_factory: InMemoryPrototypeArtifactRepository())
     monkeypatch.setattr(app_main, "PostgresWorkRepository", lambda _connection_factory: NoopWorkRepository())
     monkeypatch.setattr(app_main, "PostgresSkillRepository", lambda _connection_factory: InMemorySkillRepository())

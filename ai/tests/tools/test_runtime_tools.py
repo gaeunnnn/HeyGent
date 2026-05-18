@@ -700,6 +700,57 @@ def test_session_agent_task_merges_explicit_and_parent_design_skill_requirements
     assert len(work_repository.items) == 1
 
 
+def test_session_agent_task_does_not_infer_parent_skill_from_exclusion_text():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    work_repository.items[parent.work_id] = parent
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-k",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.k",
+            "config_snapshot": {
+                "name": "K-에이전트",
+                "role": "k-services",
+                "skills": ["srt-booking"],
+            },
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={"workId": parent.work_id, "enabledSkillNames": ["mattermost-send", "notion"]},
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={
+            "title": "SRT 실제 예약",
+            "description": "SRT 예약만 담당합니다. Mattermost 공유와 Notion 일정 등록은 팀장이 직접 처리하므로 수행하지 마세요.",
+            "instruction": "srt-booking 스킬로 부산에서 수서로 가는 SRT를 예약하세요. Mattermost/Notion 작업은 수행하지 않음.",
+            "assigneeAgentId": "agent-k",
+            "requiredSkillNames": ["srt-booking"],
+        },
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is True
+    assert result["child_work"]["assigneeAgentId"] == "agent-k"
+
+
 def test_session_agent_task_can_create_root_work_when_default_agent_session_allows_it():
     work_repository = FakeRuntimeWorkRepository()
     agent_repository = FakeRuntimeAgentRepository(

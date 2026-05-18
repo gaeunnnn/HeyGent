@@ -22,7 +22,7 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
     ),
     "skill-runtime": RuntimeToolsetDefinition(
         description="Restricted skill execution tools.",
-        tools=("skill.execute",),
+        tools=("skill.execute", "skill.run_script"),
     ),
     "session": RuntimeToolsetDefinition(
         description="Session record and recall tools.",

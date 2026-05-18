@@ -37,6 +37,7 @@ def test_backend_notion_client_posts_internal_execute_request(monkeypatch):
             backend_base_url="http://backend.local",
             internal_service_token="internal-token",
             backend_memory_timeout_seconds=3.0,
+            backend_tool_timeout_seconds=9.0,
         )
     )
 
@@ -47,7 +48,7 @@ def test_backend_notion_client_posts_internal_execute_request(monkeypatch):
 
     assert result == [{"success": True, "endpoint": "/v1/search"}]
     assert captured["url"] == "http://backend.local/internal/ai/notion/execute"
-    assert captured["timeout"] == 3.0
+    assert captured["timeout"] == 9.0
     assert captured["headers"]["Authorization"] == "Bearer internal-token"
     assert captured["body"]["userId"] == 7
     assert captured["body"]["commands"][0]["endpoint"] == "/v1/search"

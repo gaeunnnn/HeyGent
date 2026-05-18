@@ -84,7 +84,7 @@ export function SubAgentDetailView({
 }: {
   item: AgentPanelItem
   onDelete: () => Promise<void>
-  onSave: (agent: Agent) => void
+  onSave: (agent: Agent) => Agent | Promise<Agent | void> | void
   onTabChange?: (tab: SubAgentDetailTab) => void
   requestedTab?: string | null
   reservedNames: string[]
@@ -256,18 +256,22 @@ export function SubAgentDetailView({
     setSaved(false)
   }
 
+  const syncInstructionsDraft = (agent: Agent) => {
+    setInstructionsDraft(agent.instructions ?? '')
+    setInstructionsEntryFile(agent.instructionsEntryFile ?? 'AGENTS.md')
+    setInstructionsFiles(agent.instructionsFiles ?? {})
+    setInstructionsMode(agent.instructionsMode ?? 'managed')
+    setInstructionsRootPath(agent.instructionsRootPath ?? '')
+  }
+
   const resetInstructionsDraft = () => {
-    setInstructionsDraft(item.agent.instructions ?? '')
-    setInstructionsEntryFile(item.agent.instructionsEntryFile ?? 'AGENTS.md')
-    setInstructionsFiles(item.agent.instructionsFiles ?? {})
-    setInstructionsMode(item.agent.instructionsMode ?? 'managed')
-    setInstructionsRootPath(item.agent.instructionsRootPath ?? '')
+    syncInstructionsDraft(item.agent)
     setSaved(false)
   }
 
   const saveInstructionsDraft = () => {
     if (!instructionsDirty) return
-    onSave({
+    const result = onSave({
       ...item.agent,
       instructions: instructionsDraft.trim(),
       instructionsEntryFile: instructionsEntryFile.trim() || 'AGENTS.md',
@@ -275,8 +279,13 @@ export function SubAgentDetailView({
       instructionsMode,
       instructionsRootPath: instructionsRootPath.trim(),
     })
-    setSaved(true)
-    window.setTimeout(() => setSaved(false), 1400)
+    void Promise.resolve(result).then((savedAgent) => {
+      if (savedAgent !== undefined) {
+        syncInstructionsDraft(savedAgent)
+      }
+      setSaved(true)
+      window.setTimeout(() => setSaved(false), 1400)
+    })
   }
 
   const toggleSkill = (skillId: string, checked: boolean) => {

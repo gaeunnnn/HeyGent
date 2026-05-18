@@ -22,6 +22,7 @@ from app.contracts.agents import (
     UpdateUserSkillSettingRequest,
     UpdateSessionAgentRequest,
 )
+from app.domain.agents.secret_store import AgentSecretStoreNotConfigured
 
 router = APIRouter(tags=["agents"], dependencies=[Depends(document_bearer_auth)])
 
@@ -292,6 +293,8 @@ async def save_agent_instruction_document(
         )
     except KeyError as error:
         raise HTTPException(status_code=404, detail="instruction bundle not found") from error
+    except AgentSecretStoreNotConfigured as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return _document_response(document)
 
 

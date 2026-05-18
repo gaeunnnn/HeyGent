@@ -40,6 +40,7 @@ from app.api.memory_mark_used import LlmMemoryUsageAttributionVerifier
 from app.domain.orchestration.orchestrator import Orchestrator
 from app.domain.orchestration.runtime_planning import Planner
 from app.domain.orchestration.task_execution_supervisor import TaskExecutionSupervisor, TaskExecutionSupervisorConfig
+from app.domain.agents.secret_store import AesGcmAgentSecretCipher, AgentSecretStoreNotConfigured
 from app.domain.providers.model import GeminiAPIProvider, OpenAIAPIProvider
 from app.domain.providers.registry import ProviderRegistry
 from app.storage.postgres import (
@@ -137,7 +138,14 @@ async def lifespan(app: FastAPI):
     session_store = PostgresSessionStore(postgres_connection_factory)
     work_repository = PostgresWorkRepository(postgres_connection_factory)
     workflow_template_repository = PostgresWorkflowTemplateRepository(postgres_connection_factory)
-    agent_repository = PostgresAgentRepository(postgres_connection_factory)
+    try:
+        agent_secret_cipher = AesGcmAgentSecretCipher(settings.agent_secret_encryption_key)
+    except AgentSecretStoreNotConfigured:
+        agent_secret_cipher = None
+    agent_repository = PostgresAgentRepository(
+        postgres_connection_factory,
+        secret_cipher=agent_secret_cipher,
+    )
     prototype_repository = PostgresPrototypeArtifactRepository(postgres_connection_factory)
     agent_repository.ensure_builtin_templates()
     # recall_service = RecallService(session_store)

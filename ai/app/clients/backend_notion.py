@@ -35,7 +35,7 @@ class BackendNotionClient:
         )
 
         try:
-            with urlopen(request, timeout=self._settings.backend_memory_timeout_seconds) as response:
+            with urlopen(request, timeout=self._settings.backend_tool_timeout_seconds) as response:
                 body = response.read(500_000).decode("utf-8", errors="replace")
         except HTTPError as error:
             raise BackendNotionClientError(_backend_error_message(error)) from error
