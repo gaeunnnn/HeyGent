@@ -119,6 +119,7 @@ def test_recall_planner_prompt_separates_instructions_from_task_state():
     assert "current user situations embedded in task requests" in MEMORY_RECALL_PLANNER_SYSTEM_PROMPT
     assert "interview preparation" in MEMORY_RECALL_PLANNER_SYSTEM_PROMPT
     assert "지난번처럼 docs/logs 작업하고 커밋해줘" in MEMORY_RECALL_PLANNER_SYSTEM_PROMPT
+    assert "preferred name, nickname, addressing" in MEMORY_RECALL_PLANNER_SYSTEM_PROMPT
 
 
 def test_plan_memory_recall_skips_low_value_greeting():
@@ -220,6 +221,37 @@ async def test_llm_memory_recall_planner_handles_personalized_recommendation():
     assert plan.should_recall is True
     assert plan.query == "사용자 점심 메뉴 선호"
     assert plan.reason == "점심 추천은 사용자 음식 선호가 필요함"
+    assert plan.planner_source == "llm"
+    assert plan.filters() == {
+        "store_type": "USER_PROFILE",
+        "memory_type": "PREFERENCE",
+        "scope_type": "GLOBAL",
+        "metadata_categories": ["preference"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_memory_recall_planner_handles_saved_addressing_preference():
+    provider = FakeRecallPlannerProvider(
+        {
+            "shouldRecall": True,
+            "query": "사용자 호칭 선호",
+            "reason": "사용자가 선호하는 호칭 기억이 필요함",
+            "filters": {
+                "storeType": "USER_PROFILE",
+                "memoryType": "PREFERENCE",
+                "scopeType": "GLOBAL",
+                "metadataCategories": ["preference"],
+            },
+        }
+    )
+    planner = LlmMemoryRecallPlanner(provider=provider)
+
+    plan = await planner.plan_recall("나 뭐라고 부르기로 했지?", workspace_key="team-a")
+
+    assert plan.should_recall is True
+    assert plan.query == "사용자 호칭 선호"
+    assert plan.reason == "사용자가 선호하는 호칭 기억이 필요함"
     assert plan.planner_source == "llm"
     assert plan.filters() == {
         "store_type": "USER_PROFILE",
