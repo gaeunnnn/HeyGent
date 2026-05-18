@@ -204,6 +204,21 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS ai_agent_secret_values (
+        secret_value_id TEXT PRIMARY KEY,
+        owner_key TEXT NOT NULL,
+        owner_user_id BIGINT REFERENCES users(id),
+        profile_id TEXT NOT NULL REFERENCES ai_agent_profiles(profile_id) ON DELETE CASCADE,
+        document_key TEXT NOT NULL,
+        section_key TEXT NOT NULL,
+        secret_key TEXT NOT NULL,
+        encrypted_value TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (profile_id, document_key, section_key, secret_key)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS ai_skill_catalog (
         skill_id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -628,6 +643,10 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
     """
     CREATE INDEX IF NOT EXISTS idx_ai_agent_instruction_documents_bundle
     ON ai_agent_instruction_documents(bundle_id, document_key);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ai_agent_secret_values_profile
+    ON ai_agent_secret_values(profile_id, document_key, section_key);
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_ai_skill_catalog_source

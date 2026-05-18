@@ -23,6 +23,8 @@ dependencies = [
   "exa-py>=2.9,<3",
   "parallel-web>=0.4,<1",
   "firebase-admin>=6.5,<7",
+  "cryptography>=42,<46",
+  "SRTrain>=2.6.7,<3",
 ]
 
 [project.optional-dependencies]

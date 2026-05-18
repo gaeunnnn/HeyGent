@@ -145,7 +145,7 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
             const previousAgent = detailItem.agent
             const optimisticAgent = { ...previousAgent, ...agent }
             updateAgentPanelInSession(sessionId, detailItem.id, optimisticAgent)
-            void updateSessionAgent(sessionId, detailItem.id, {
+            return updateSessionAgent(sessionId, detailItem.id, {
               name: agent.name,
               role: agent.role ?? 'general',
               title: agent.title,
@@ -166,7 +166,7 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
                 // 내려주는 경우 사용자가 방금 입력한 옵티미스틱 값(특히 호칭·이름)을 덮어쓰지 않도록
                 // 보호한다.
                 const serverAgent = agentProfileToAgent(profile)
-                updateAgentPanelInSession(sessionId, detailItem.id, {
+                const savedAgent = {
                   ...serverAgent,
                   name: serverAgent.name?.trim() ? serverAgent.name : optimisticAgent.name,
                   title: serverAgent.title?.trim() ? serverAgent.title : optimisticAgent.title,
@@ -174,7 +174,9 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
                     serverAgent.description !== undefined && serverAgent.description !== ''
                       ? serverAgent.description
                       : optimisticAgent.description,
-                })
+                }
+                updateAgentPanelInSession(sessionId, detailItem.id, savedAgent)
+                return savedAgent
               })
               .catch((error) => {
                 // 실패 시 옵티미스틱 패치를 이전 상태로 롤백

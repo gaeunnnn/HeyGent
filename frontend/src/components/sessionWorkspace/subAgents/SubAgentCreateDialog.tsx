@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Bot, ChevronLeft, ChevronRight, Sparkles, type LucideIcon } from 'lucide-react'
+import { useState } from 'react'
+import { ArrowLeft, Bot, Settings2, Sparkles, Users, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { HelpHint } from '@/components/ui/help-hint'
@@ -11,6 +11,36 @@ const ADAPTER_ICONS: Record<SubAgentAdapterType, LucideIcon> = {
   openai_api_key: Bot,
   gemini_api_key: Sparkles,
 }
+
+type CreateMode = 'ceo' | 'template' | 'manual'
+
+const MODE_OPTIONS: Array<{
+  id: CreateMode
+  label: string
+  description: string
+  icon: LucideIcon
+}> = [
+  {
+    id: 'ceo',
+    label: '팀장 에이전트에게 요청',
+    description: '대화 맥락과 필요한 역할을 잘 아는 팀장 에이전트가 대신 만들어 줍니다.',
+    icon: Bot,
+  },
+  {
+    id: 'template',
+    label: '기본 제공 에이전트',
+    description: '미리 만들어진 역할 중에서 골라 빠르게 추가합니다.',
+    icon: Users,
+  },
+  {
+    id: 'manual',
+    label: '직접 세부 설정하기',
+    description: '모델 공급자와 세부 설정을 직접 골라 만듭니다.',
+    icon: Settings2,
+  },
+]
+
+type Step = 'select' | 'detail'
 
 export function SubAgentCreateDialog({
   onAskCeo,
@@ -27,25 +57,34 @@ export function SubAgentCreateDialog({
   open: boolean
   templates: AgentTemplate[]
 }) {
-  const [showAdvancedCards, setShowAdvancedCards] = useState(false)
-  const [activeTemplateIndex, setActiveTemplateIndex] = useState(0)
+  const [step, setStep] = useState<Step>('select')
+  const [selectedMode, setSelectedMode] = useState<CreateMode>('ceo')
+  const [selectedTemplateKey, setSelectedTemplateKey] = useState<string | null>(null)
+
+  const resetState = () => {
+    setStep('select')
+    setSelectedMode('ceo')
+    setSelectedTemplateKey(null)
+  }
 
   const closeDialog = () => {
-    setShowAdvancedCards(false)
-    setActiveTemplateIndex(0)
+    resetState()
     onOpenChange(false)
   }
 
-  const activeTemplate =
-    templates.length > 0
-      ? (templates[Math.min(activeTemplateIndex, templates.length - 1)] ?? null)
-      : null
+  const goNext = () => {
+    if (selectedMode === 'ceo') {
+      onAskCeo()
+      return
+    }
+    setStep('detail')
+  }
 
   return (
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen) setShowAdvancedCards(false)
+        if (!nextOpen) resetState()
         onOpenChange(nextOpen)
       }}
     >
@@ -81,53 +120,117 @@ export function SubAgentCreateDialog({
           </Button>
         </div>
 
-        <div className="space-y-6 px-4 py-5">
-          {!showAdvancedCards ? (
+        <div className="space-y-5 px-4 py-5">
+          {step === 'select' ? (
             <>
-              <div className="space-y-3 text-center">
-                <div className="bg-accent mx-auto flex h-12 w-12 items-center justify-center rounded-full">
-                  <Bot className="text-foreground h-6 w-6" />
-                </div>
-                <p className="text-muted-foreground text-sm">
-                  대화 맥락과 필요한 역할을 잘 아는 팀장 에이전트에게 에이전트 생성을 맡길 수
-                  있습니다.
-                </p>
+              <p className="text-muted-foreground text-sm">
+                어떤 방법으로 새 에이전트를 만들지 골라 주세요.
+              </p>
+
+              <div role="radiogroup" aria-label="에이전트 생성 방법" className="grid gap-2">
+                {MODE_OPTIONS.map((option) => {
+                  const Icon = option.icon
+                  const selected = selectedMode === option.id
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => setSelectedMode(option.id)}
+                      className={cn(
+                        'flex items-start gap-3 rounded-md border p-3 text-left transition-colors',
+                        selected
+                          ? 'border-foreground/60 bg-accent/40'
+                          : 'border-border hover:bg-accent/30',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border',
+                          selected ? 'border-foreground' : 'border-muted-foreground/50',
+                        )}
+                      >
+                        {selected && <span className="bg-foreground h-2 w-2 rounded-full" />}
+                      </span>
+                      <Icon className="text-muted-foreground mt-0.5 h-4 w-4 shrink-0" />
+                      <span className="min-w-0 flex-1 space-y-0.5">
+                        <span className="block text-sm font-medium">{option.label}</span>
+                        <span className="text-muted-foreground block text-xs leading-5">
+                          {option.description}
+                        </span>
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
 
-              <Button className="w-full" size="lg" onClick={onAskCeo}>
-                <Bot className="mr-2 h-4 w-4" />
-                팀장 에이전트에게 새 에이전트 생성 요청
+              <Button className="w-full" size="lg" onClick={goNext}>
+                다음
               </Button>
-
-              <div className="space-y-3">
-                <div className="text-muted-foreground text-left text-xs font-medium">
-                  기본 제공 에이전트
-                </div>
-                <TemplateCarousel
-                  templates={templates}
-                  activeIndex={activeTemplateIndex}
-                  onActiveIndexChange={setActiveTemplateIndex}
-                />
-                {activeTemplate && (
-                  <Button
-                    className="w-full"
-                    size="lg"
-                    onClick={() => onPickTemplate(activeTemplate.templateKey)}
-                  >
-                    에이전트 생성
-                  </Button>
-                )}
-              </div>
-
-              <div className="text-center">
+            </>
+          ) : selectedMode === 'template' ? (
+            <>
+              <div>
                 <button
                   type="button"
-                  className="text-muted-foreground hover:text-foreground text-xs underline underline-offset-2 transition-colors"
-                  onClick={() => setShowAdvancedCards(true)}
+                  className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs transition-colors"
+                  onClick={() => setStep('select')}
                 >
-                  직접 세부 설정하기
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  뒤로
                 </button>
               </div>
+
+              {templates.length === 0 ? (
+                <div className="border-border text-muted-foreground rounded-md border px-3 py-6 text-center text-xs">
+                  사용 가능한 기본 에이전트가 없습니다.
+                </div>
+              ) : (
+                <div className="grid max-h-[55vh] gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+                  {templates.map((template) => {
+                    const selected = selectedTemplateKey === template.templateKey
+                    return (
+                      <button
+                        key={template.templateKey}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setSelectedTemplateKey(template.templateKey)}
+                        className={cn(
+                          'flex items-start gap-3 rounded-md border p-3 text-left transition-colors',
+                          selected
+                            ? 'border-foreground/60 bg-accent/40'
+                            : 'border-border hover:bg-accent/30',
+                        )}
+                      >
+                        <span className="bg-muted/70 mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md">
+                          <Bot className="h-4 w-4" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium break-keep">
+                            {template.displayName}
+                          </span>
+                          <span className="text-muted-foreground mt-0.5 line-clamp-3 block text-xs leading-5 break-keep">
+                            {template.description}
+                          </span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+
+              <Button
+                className="w-full"
+                size="lg"
+                disabled={!selectedTemplateKey}
+                onClick={() => {
+                  if (selectedTemplateKey) onPickTemplate(selectedTemplateKey)
+                }}
+              >
+                에이전트 생성
+              </Button>
             </>
           ) : (
             <>
@@ -135,7 +238,7 @@ export function SubAgentCreateDialog({
                 <button
                   type="button"
                   className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs transition-colors"
-                  onClick={() => setShowAdvancedCards(false)}
+                  onClick={() => setStep('select')}
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                   뒤로
@@ -162,7 +265,6 @@ export function SubAgentCreateDialog({
                       title={comingSoon ? '준비 중' : undefined}
                       onClick={() => {
                         if (comingSoon) return
-                        setShowAdvancedCards(false)
                         onPickAdapter(option.id)
                       }}
                     >
@@ -182,128 +284,5 @@ export function SubAgentCreateDialog({
         </div>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function TemplateCarousel({
-  templates,
-  activeIndex,
-  onActiveIndexChange,
-}: {
-  templates: AgentTemplate[]
-  activeIndex: number
-  onActiveIndexChange: (index: number) => void
-}) {
-  const scrollerRef = useRef<HTMLDivElement | null>(null)
-  const total = templates.length
-
-  // 스크롤 위치 → 현재 인덱스 추적
-  useEffect(() => {
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    const handleScroll = () => {
-      const cardWidth = scroller.clientWidth
-      if (cardWidth === 0) return
-      const next = Math.round(scroller.scrollLeft / cardWidth)
-      onActiveIndexChange(next)
-    }
-    scroller.addEventListener('scroll', handleScroll, { passive: true })
-    return () => scroller.removeEventListener('scroll', handleScroll)
-  }, [onActiveIndexChange])
-
-  // activeIndex가 외부에서 변경됐을 때 스크롤 위치도 동기화
-  useEffect(() => {
-    const scroller = scrollerRef.current
-    if (!scroller) return
-    const target = Math.max(0, Math.min(total - 1, activeIndex))
-    const desiredLeft = target * scroller.clientWidth
-    if (Math.abs(scroller.scrollLeft - desiredLeft) > 4) {
-      scroller.scrollTo({ left: desiredLeft, behavior: 'smooth' })
-    }
-  }, [activeIndex, total])
-
-  const goToIndex = (index: number) => {
-    const next = Math.max(0, Math.min(total - 1, index))
-    onActiveIndexChange(next)
-  }
-
-  if (total === 0) {
-    return (
-      <div className="border-border text-muted-foreground rounded-md border px-3 py-6 text-center text-xs">
-        사용 가능한 기본 에이전트가 없습니다.
-      </div>
-    )
-  }
-
-  const canPrev = activeIndex > 0
-  const canNext = activeIndex < total - 1
-
-  return (
-    <div className="w-full min-w-0 space-y-3">
-      <div className="relative w-full min-w-0">
-        <div
-          ref={scrollerRef}
-          className="flex w-full min-w-0 snap-x snap-mandatory overflow-x-auto scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        >
-          {templates.map((template) => (
-            <div
-              key={template.templateKey}
-              className="min-w-0 shrink-0 grow-0 basis-full snap-start"
-            >
-              <div className="border-border flex h-32 w-full items-start gap-3 rounded-md border p-3 pr-12 text-left">
-                <span className="bg-muted/70 mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md">
-                  <Bot className="h-4 w-4" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium">{template.displayName}</span>
-                  <span className="text-muted-foreground mt-0.5 line-clamp-4 block text-xs leading-5">
-                    {template.description}
-                  </span>
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-        {canPrev && (
-          <button
-            type="button"
-            aria-label="이전 에이전트"
-            onClick={() => goToIndex(activeIndex - 1)}
-            className="border-border bg-background/95 text-muted-foreground hover:text-foreground hover:bg-accent/50 absolute top-1/2 left-2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border shadow-sm transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-        )}
-        {canNext && (
-          <button
-            type="button"
-            aria-label="다음 에이전트"
-            onClick={() => goToIndex(activeIndex + 1)}
-            className="border-border bg-background/95 text-muted-foreground hover:text-foreground hover:bg-accent/50 absolute top-1/2 right-2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border shadow-sm transition-colors"
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        )}
-      </div>
-
-      {total > 1 && (
-        <div className="flex items-center justify-center gap-1.5">
-          {templates.map((template, index) => (
-            <button
-              key={template.templateKey}
-              type="button"
-              aria-label={`${index + 1}번째 에이전트로 이동`}
-              onClick={() => goToIndex(index)}
-              className={cn(
-                'h-1.5 rounded-full transition-all',
-                index === activeIndex
-                  ? 'bg-foreground/70 w-4'
-                  : 'bg-muted-foreground/30 hover:bg-muted-foreground/50 w-1.5',
-              )}
-            />
-          ))}
-        </div>
-      )}
-    </div>
   )
 }

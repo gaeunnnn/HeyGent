@@ -1,5 +1,4 @@
 import {
-  AudioLines,
   BarChart2,
   FileImage,
   ImageIcon,
@@ -45,7 +44,6 @@ type ChatComposerProps = {
   onClearSelectedWork?: () => void
   onSelectWorkClick?: () => void
   onStop?: () => void
-  onVoiceMode?: () => void
   draftValue?: string | null
   statusMessage?: string | null
   selectedWorkLabel?: string | null
@@ -63,7 +61,6 @@ export function ChatComposer({
   onClearSelectedWork,
   onSelectWorkClick,
   onStop,
-  onVoiceMode,
   draftValue = null,
   statusMessage = null,
   selectedWorkLabel = null,
@@ -411,17 +408,7 @@ export function ChatComposer({
                   <Send className="h-4 w-4" />
                 )}
               </button>
-            ) : (
-              <button
-                type="button"
-                onClick={onVoiceMode}
-                aria-label="음성 대화 모드"
-                title="음성 대화 모드"
-                className="bg-foreground text-background hover:bg-foreground/85 shrink-0 rounded-2xl p-2.5 transition-colors"
-              >
-                <AudioLines className="h-4 w-4" />
-              </button>
-            )}
+            ) : null}
           </div>
           {statusMessage && (
             <p className="text-muted-foreground border-border/60 border-t px-5 py-2 text-xs">

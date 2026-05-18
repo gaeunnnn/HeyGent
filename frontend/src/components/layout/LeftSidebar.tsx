@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router'
 import {
   Building2,
@@ -85,7 +85,6 @@ export function LeftSidebar() {
   const [newSessionModalOpen, setNewSessionModalOpen] = useState(false)
   const [newSessionCreating, setNewSessionCreating] = useState(false)
   const [newSessionError, setNewSessionError] = useState<string | null>(null)
-  const commandClient = useAiRealtimeStore((state) => state.commandClient)
   const realtimeStatus = useAiRealtimeStore((state) => state.connectionStatus)
   const sessionsById = useChatStore((state) => state.sessionsById)
   const messagesBySessionId = useChatStore((state) => state.messagesBySessionId)
@@ -108,13 +107,8 @@ export function LeftSidebar() {
     return [...pinned, ...unpinned]
   }, [messagesBySessionId, pinnedSessionIds, sessionsById, taskRunsById])
 
-  useEffect(() => {
-    if (commandClient === null) {
-      return
-    }
-
-    void fetchSessions().catch(() => undefined)
-  }, [commandClient, fetchSessions])
+  // fetchSessions 호출은 AiRealtimeProvider 의 auth.ok 핸들러가 단독으로 담당.
+  // LeftSidebar 에서 또 호출하면 같은 명령이 2회 발사돼 사이드바 로드가 두 배 느려진다.
 
   const createDefaultAgentSession = (config: CustomAgentConfig) => {
     setNewSessionCreating(true)
@@ -294,7 +288,7 @@ export function LeftSidebar() {
                 type="button"
                 onClick={() => handleOpenPrimaryRoute('/agent-status')}
                 className="flex h-12 w-12 items-center justify-center rounded-xl"
-                aria-label="에이전트 상태로 이동"
+                aria-label="내 사무실로 이동"
               >
                 <img
                   src="/img_logo_light.png"
@@ -311,7 +305,7 @@ export function LeftSidebar() {
 
             <div className="bg-border my-1 h-px w-10" />
 
-            <CollapsedTooltip label="에이전트 상태">
+            <CollapsedTooltip label="내 사무실">
               <button
                 type="button"
                 onClick={() => handleOpenPrimaryRoute('/agent-status')}
@@ -320,7 +314,7 @@ export function LeftSidebar() {
                     ? 'bg-accent text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
-                aria-label="에이전트 상태로 이동"
+                aria-label="내 사무실로 이동"
               >
                 <Building2 className="h-5 w-5" />
               </button>
@@ -445,7 +439,7 @@ export function LeftSidebar() {
                 type="button"
                 onClick={() => handleOpenPrimaryRoute('/agent-status')}
                 className="flex h-full w-full min-w-0 items-center justify-center rounded-lg p-0"
-                aria-label="에이전트 상태로 이동"
+                aria-label="내 사무실로 이동"
               >
                 <img
                   src="/text_logo_light.png"
@@ -472,7 +466,7 @@ export function LeftSidebar() {
                   }`}
                 >
                   <Building2 className="h-5 w-5 shrink-0" />
-                  <span>에이전트 상태</span>
+                  <span>내 사무실</span>
                 </button>
                 <button
                   type="button"

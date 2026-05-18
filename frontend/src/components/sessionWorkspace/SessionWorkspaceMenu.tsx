@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import {
-  Bot,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -361,7 +360,12 @@ export function SessionWorkspaceMenu({
                   activePanel === 'ceo' ? 'bg-accent text-foreground' : 'text-foreground/80'
                 }`}
               >
-                <Bot className="text-muted-foreground h-5 w-5 shrink-0" />
+                <img
+                  src="/assets/agents/ceo/ceo_profile.png"
+                  alt="팀장"
+                  draggable={false}
+                  className="h-6 w-6 shrink-0 object-contain"
+                />
                 <input
                   autoFocus
                   value={mainAgentDraft}
@@ -389,7 +393,12 @@ export function SessionWorkspaceMenu({
                     : 'text-foreground/80 hover:bg-accent/50 hover:text-foreground'
                 }`}
               >
-                <Bot className="text-muted-foreground h-5 w-5 shrink-0" />
+                <img
+                  src="/assets/agents/ceo/ceo_profile.png"
+                  alt="팀장"
+                  draggable={false}
+                  className="h-6 w-6 shrink-0 object-contain"
+                />
                 <span className="truncate">{mainAgentName}</span>
               </button>
             )}

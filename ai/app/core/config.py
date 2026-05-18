@@ -34,6 +34,7 @@ class Settings:
     backend_auth_verify_url: str = "http://127.0.0.1:8080/internal/ai/auth/validate"
     backend_bridge_auth_verify_url: str = "http://127.0.0.1:8080/internal/bridge/auth/validate"
     backend_memory_timeout_seconds: float = 5.0
+    backend_tool_timeout_seconds: float = 10.0
     memory_recall_llm_planner_enabled: bool = False
     internal_service_token: str | None = None
     redis_url: str | None = None
@@ -62,6 +63,7 @@ class Settings:
     agent_loop_worker_default_max_iterations: int = 80
     agent_loop_max_iterations: int = 120
     work_execution_max_iterations: int = 24
+    agent_secret_encryption_key: str | None = None
     # DEPRECATED: 단일 공유 토큰 시절 잔재. 현재는 backend /internal/bridge/auth/validate 로 검증.
     bridge_token: str | None = None
 
@@ -179,6 +181,10 @@ def get_settings() -> Settings:
             _read_env("HEYGENT_BACKEND_MEMORY_TIMEOUT_SECONDS", 5.0, dotenv_values),
             default=5.0,
         ),
+        backend_tool_timeout_seconds=_parse_float(
+            _read_env("HEYGENT_BACKEND_TOOL_TIMEOUT_SECONDS", 10.0, dotenv_values),
+            default=10.0,
+        ),
         memory_recall_llm_planner_enabled=_parse_bool(
             _read_env("HEYGENT_MEMORY_RECALL_LLM_PLANNER_ENABLED", "false", dotenv_values),
             default=False,
@@ -269,5 +275,6 @@ def get_settings() -> Settings:
             _read_env("HEYGENT_WORK_EXECUTION_MAX_ITERATIONS", 24, dotenv_values),
             default=24,
         ),
+        agent_secret_encryption_key=_read_env("HEYGENT_AGENT_SECRET_ENCRYPTION_KEY", None, dotenv_values),
         bridge_token=_read_env("HEYGENT_BRIDGE_TOKEN", None, dotenv_values),
     )

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,7 @@ class LocalToolRuntime:
                 "skills.read": self._read_skill,
                 "skills.read_file": self._read_skill_file,
                 "skill.execute": self._execute_skill,
+                "skill.run_script": self._run_skill_script,
                 "session.record": self._record_session_message,
                 "session.search": self._search_sessions,
                 "todo": self._todo,
@@ -388,6 +390,129 @@ class LocalToolRuntime:
             "files": self._list_skill_files(document_path),
             "content": str(skill.get("body") or ""),
         }
+
+    def _run_skill_script(self, args: dict[str, Any]) -> dict[str, object]:
+        skill_name = str(args.get("skill_name") or "").strip()
+        if not self._is_runtime_skill_enabled(skill_name):
+            return self._tool_error(
+                code="skill_disabled",
+                message=f"disabled skill: {skill_name}",
+                tool_name="skill.run_script",
+            )
+
+        skill = getattr(self.skill_registry, "_skills", {}).get(skill_name)
+        if skill is None:
+            return self._tool_error(
+                code="skill_not_found",
+                message=f"unknown skill: {skill_name}",
+                tool_name="skill.run_script",
+            )
+
+        document_path = self._resolve_skill_document_path(skill.get("path"))
+        if document_path is None or not self._is_allowed_skill_path(document_path):
+            return self._tool_error(
+                code="skill_path_not_allowed",
+                message="skill document path must stay inside app/skills",
+                tool_name="skill.run_script",
+            )
+
+        script_path = self._resolve_skill_resource_path(document_path, args.get("script_path"))
+        skill_dir = document_path.parent.resolve(strict=False)
+        scripts_dir = (skill_dir / "scripts").resolve(strict=False)
+        if (
+            script_path is None
+            or not self._is_relative_to(script_path, scripts_dir)
+            or script_path.suffix != ".py"
+        ):
+            return self._tool_error(
+                code="skill_script_not_allowed",
+                message="skill script path must be a Python file inside the selected skill's scripts directory",
+                tool_name="skill.run_script",
+            )
+        if not script_path.exists() or not script_path.is_file():
+            return self._tool_error(
+                code="skill_script_not_found",
+                message="skill script not found",
+                tool_name="skill.run_script",
+            )
+
+        env = os.environ.copy()
+        injected_secret_keys: list[str] = []
+        secret_values = self._agent_secret_env_for_skill(skill_name)
+        for key, value in secret_values.items():
+            env[key] = value
+            injected_secret_keys.append(key)
+
+        required_secret_keys = self._string_list(args.get("required_secret_keys"))
+        missing_secret_keys = [key for key in required_secret_keys if not env.get(key)]
+        if missing_secret_keys:
+            error_payload = self._tool_error(
+                code="missing_skill_secrets",
+                message="required skill secrets are not saved",
+                tool_name="skill.run_script",
+                details={"missing_secret_keys": missing_secret_keys},
+            )
+            error_payload["missing_secret_keys"] = missing_secret_keys
+            return error_payload
+
+        argv = [sys.executable, str(script_path), *self._string_list(args.get("argv"))]
+        timeout_seconds = float(args.get("timeout_seconds") or 30.0)
+        completed = subprocess.run(
+            argv,
+            cwd=str(skill_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        stdout, stdout_truncated = self._truncate_terminal_stream("stdout", completed.stdout)
+        stderr, stderr_truncated = self._truncate_terminal_stream("stderr", completed.stderr)
+        return {
+            "ok": completed.returncode == 0,
+            "skill_name": skill_name,
+            "script_path": script_path.relative_to(skill_dir).as_posix(),
+            "returncode": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "injected_secret_keys": sorted(injected_secret_keys),
+        }
+
+    def _agent_secret_env_for_skill(self, skill_name: str) -> dict[str, str]:
+        profile_id = self._runtime_agent_profile_id()
+        if not profile_id or not self.owner_key or self.agent_repository is None:
+            return {}
+        getter = getattr(self.agent_repository, "get_agent_secret_values", None)
+        if not callable(getter):
+            return {}
+        values = getter(
+            profile_id=profile_id,
+            owner_key=self.owner_key,
+            document_key="SECRETS.md",
+            section_key=skill_name,
+        )
+        if not isinstance(values, dict):
+            return {}
+        section_values = values.get(skill_name)
+        if not isinstance(section_values, dict):
+            return {}
+        return {
+            str(key).strip(): str(value)
+            for key, value in section_values.items()
+            if str(key).strip() and str(value)
+        }
+
+    def _runtime_agent_profile_id(self) -> str | None:
+        for key in ("agentProfileId", "agent_profile_id", "workAssigneeAgentId", "work_assignee_agent_id"):
+            value = self._optional_text(self.runtime_context.get(key))
+            if value:
+                return value
+        profile = self.runtime_context.get("targetAgentProfile")
+        if isinstance(profile, dict):
+            return self._optional_text(profile.get("profileId") or profile.get("profile_id"))
+        return None
 
     def _runtime_skills(self) -> dict[str, Any]:
         skills = getattr(self.skill_registry, "_skills", {})
@@ -1304,11 +1429,52 @@ class LocalToolRuntime:
         if not parent_skill_names:
             return required
 
-        haystack = self._normalize_match_text(" ".join(text_parts))
         for skill_name in parent_skill_names:
-            if self._normalize_match_text(skill_name) in haystack:
+            if self._has_required_parent_skill_reference(skill_name, text_parts):
                 self._append_unique(required, skill_name)
         return required
+
+    def _has_required_parent_skill_reference(self, skill_name: str, text_parts: list[str]) -> bool:
+        needle = self._normalize_match_text(skill_name)
+        if not needle:
+            return False
+        for text_part in text_parts:
+            haystack = self._normalize_match_text(text_part)
+            start = 0
+            while True:
+                index = haystack.find(needle, start)
+                if index < 0:
+                    break
+                if not self._skill_reference_is_excluded(haystack, index, len(needle)):
+                    return True
+                start = index + len(needle)
+        return False
+
+    @staticmethod
+    def _skill_reference_is_excluded(haystack: str, index: int, length: int) -> bool:
+        window_start = max(0, index - 80)
+        window_end = min(len(haystack), index + length + 80)
+        window = haystack[window_start:window_end]
+        exclusion_markers = (
+            "수행하지",
+            "하지마",
+            "하지않",
+            "맡기지",
+            "요구하지",
+            "필요없",
+            "제외",
+            "팀장이직접",
+            "직접처리",
+            "donot",
+            "doesnot",
+            "mustnot",
+            "shouldnot",
+            "notrequire",
+            "notrequired",
+            "exclude",
+            "without",
+        )
+        return any(marker in window for marker in exclusion_markers)
 
     def _missing_profile_skills(self, profile: dict[str, Any], required_skill_names: list[str] | None) -> list[str]:
         if not required_skill_names:

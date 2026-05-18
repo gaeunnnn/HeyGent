@@ -225,11 +225,12 @@ class WebSocketCommandRouter:
         include_archived = bool(payload.get("includeArchived", payload.get("include_archived", False)))
         offset = (page - 1) * page_size
         session_store = context.websocket.app.state.session_store
+        # 사용자별 세션은 최대 10개 보장 (제품 정책) — limit 을 작게 잡아 DB·메모리·정렬 비용 모두 절감.
         sessions = [
             session
             for session in session_store.list_sessions(
                 user_id=context.auth.user_id,
-                limit=10_000,
+                limit=10,
                 offset=0,
                 include_archived=include_archived,
             )

@@ -938,7 +938,7 @@ export function DashboardPage() {
             <div className="grid grid-cols-3 gap-3">
               <ActionButton
                 icon={<Eye className="h-4 w-4" />}
-                label="에이전트 상태 보기"
+                label="내 사무실 보기"
                 onClick={() => navigate('/agent-status')}
               />
               <ActionButton

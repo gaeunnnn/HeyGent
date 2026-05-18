@@ -130,6 +130,7 @@ def test_postgres_schema_contains_required_durable_tables():
         "worker_handoffs",
         "ai_agent_profiles",
         "ai_agent_templates",
+        "ai_agent_secret_values",
         "provider_oauth_states",
         "provider_tokens",
         "work_counters",
@@ -160,6 +161,8 @@ def test_postgres_schema_keeps_token_plaintext_out_of_durable_tables():
     assert "token_secret_ref TEXT NOT NULL" in schema_sql
     assert "refresh_secret_ref TEXT" in schema_sql
     assert "code_verifier_secret_ref TEXT" in schema_sql
+    assert "encrypted_value TEXT NOT NULL" in schema_sql
+    assert "UNIQUE (profile_id, document_key, section_key, secret_key)" in schema_sql
 
 
 def test_postgres_schema_contains_anchor_profile_and_worker_linkage_columns():
