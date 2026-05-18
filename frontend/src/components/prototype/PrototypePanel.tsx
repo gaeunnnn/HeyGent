@@ -7,7 +7,7 @@ import {
   useSandpack,
   useSandpackClient,
 } from '@codesandbox/sandpack-react'
-import { ArrowLeft, ArrowRight, Code2, Eye, Loader2, RefreshCw, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Code2, Download, Eye, Loader2, RefreshCw, X } from 'lucide-react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { getActivePrototypeArtifact, type PrototypeArtifact } from '@/apis/prototypes'
@@ -357,7 +357,19 @@ function PrototypeSandpack({
                 Code
               </TabsTrigger>
             </TabsList>
-            <span className="text-muted-foreground text-[11px]">v{artifact.versionNumber}</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-muted-foreground text-[11px]">v{artifact.versionNumber}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="프로토타입 ZIP 다운로드"
+                title="프로토타입 ZIP 다운로드"
+                onClick={() => downloadPrototypeZip(artifact, files)}
+              >
+                <Download className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
           <TabsContent
             forceMount
@@ -654,6 +666,159 @@ function sanitizePrototypeCode(code: string) {
 function normalizeSandpackPath(path: string) {
   const normalized = path.replaceAll('\\', '/').trim()
   return normalized.startsWith('/') ? normalized : `/${normalized}`
+}
+
+function downloadPrototypeZip(artifact: PrototypeArtifact, files: SandpackFiles) {
+  const blob = createPrototypeZipBlob(files)
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = buildPrototypeZipFileName(artifact)
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function buildPrototypeZipFileName(artifact: PrototypeArtifact) {
+  const title = artifact.title || 'prototype'
+  const safeTitle = title
+    .normalize('NFKC')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80)
+  return `${safeTitle || 'prototype'}-v${artifact.versionNumber}.zip`
+}
+
+function createPrototypeZipBlob(files: SandpackFiles) {
+  const encoder = new TextEncoder()
+  const date = new Date()
+  const localParts: Uint8Array[] = []
+  const centralParts: Uint8Array[] = []
+  let offset = 0
+
+  const zipFiles = Object.entries(files)
+    .map(([path, file]) => ({
+      path: path.replaceAll('\\', '/').replace(/^\/+/, ''),
+      data: encoder.encode(getSandpackFileCode(file)),
+    }))
+    .filter((file) => file.path.length > 0)
+    .sort((left, right) => left.path.localeCompare(right.path))
+
+  for (const file of zipFiles) {
+    const name = encoder.encode(file.path)
+    const crc = crc32(file.data)
+    const time = toDosTime(date)
+    const day = toDosDate(date)
+    const localHeader = concatBytes(
+      uint32(0x04034b50),
+      uint16(20),
+      uint16(0),
+      uint16(0),
+      uint16(time),
+      uint16(day),
+      uint32(crc),
+      uint32(file.data.length),
+      uint32(file.data.length),
+      uint16(name.length),
+      uint16(0),
+      name,
+    )
+    localParts.push(localHeader, file.data)
+    centralParts.push(
+      concatBytes(
+        uint32(0x02014b50),
+        uint16(20),
+        uint16(20),
+        uint16(0),
+        uint16(0),
+        uint16(time),
+        uint16(day),
+        uint32(crc),
+        uint32(file.data.length),
+        uint32(file.data.length),
+        uint16(name.length),
+        uint16(0),
+        uint16(0),
+        uint16(0),
+        uint16(0),
+        uint32(0),
+        uint32(offset),
+        name,
+      ),
+    )
+    offset += localHeader.length + file.data.length
+  }
+
+  const centralDirectory = concatBytes(...centralParts)
+  const endRecord = concatBytes(
+    uint32(0x06054b50),
+    uint16(0),
+    uint16(0),
+    uint16(zipFiles.length),
+    uint16(zipFiles.length),
+    uint32(centralDirectory.length),
+    uint32(offset),
+    uint16(0),
+  )
+
+  return new Blob([concatBytes(...localParts, centralDirectory, endRecord)], {
+    type: 'application/zip',
+  })
+}
+
+function getSandpackFileCode(file: unknown) {
+  if (typeof file === 'string') return file
+  if (file && typeof file === 'object' && 'code' in file) {
+    const code = (file as { code?: unknown }).code
+    return typeof code === 'string' ? code : ''
+  }
+  return ''
+}
+
+function toDosTime(date: Date) {
+  return (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2)
+}
+
+function toDosDate(date: Date) {
+  return ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()
+}
+
+function uint16(value: number) {
+  return Uint8Array.of(value & 0xff, (value >>> 8) & 0xff)
+}
+
+function uint32(value: number) {
+  return Uint8Array.of(
+    value & 0xff,
+    (value >>> 8) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  )
+}
+
+function concatBytes(...parts: Uint8Array[]) {
+  const length = parts.reduce((sum, part) => sum + part.length, 0)
+  const output = new Uint8Array(length)
+  let offset = 0
+  for (const part of parts) {
+    output.set(part, offset)
+    offset += part.length
+  }
+  return output
+}
+
+function crc32(data: Uint8Array) {
+  let crc = 0xffffffff
+  for (const byte of data) {
+    crc ^= byte
+    for (let index = 0; index < 8; index += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
 }
 
 function getInitialPanelWidth() {

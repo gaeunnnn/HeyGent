@@ -80,7 +80,7 @@ def test_prototype_create_artifact_stores_react_files_without_bridge():
             "entryFile": "/src/App.tsx",
             "summary": "Stripe 계열 디자인 규칙을 반영한 대시보드 프로토타입",
             "files": {
-                "/src/App.tsx": "export default function App() { return <main /> }",
+                "/src/App.tsx": "import { Activity } from 'lucide-react'; export default function App() { return <main><Activity /></main> }",
                 "/src/styles.css": ":root { --primary: #533afd; }",
             },
         },
@@ -104,7 +104,9 @@ def test_prototype_create_artifact_stores_react_files_without_bridge():
             "design_preset_id": "stripe",
             "entry_file": "/src/App.tsx",
             "files": {
-                "/src/App.tsx": {"code": "export default function App() { return <main /> }"},
+                "/src/App.tsx": {
+                    "code": "import { Activity } from 'lucide-react'; export default function App() { return <main><Activity /></main> }"
+                },
                 "/src/styles.css": {"code": ":root { --primary: #533afd; }"},
             },
             "summary": "Stripe 계열 디자인 규칙을 반영한 대시보드 프로토타입",
@@ -224,3 +226,37 @@ def test_prototype_create_artifact_preserves_active_design_preset_for_followup_e
     assert result["ok"] is True
     assert result["designPresetId"] == "linear.app"
     assert repository.calls[-1]["design_preset_id"] == "linear.app"
+
+
+def test_prototype_create_artifact_rejects_invalid_lucide_brand_import():
+    repository = FakePrototypeRepository()
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        prototype_repository=repository,
+    ).bind_request_context(
+        owner_key="42",
+        runtime_context={"sessionId": "session_1"},
+    )
+
+    result = runtime.run_call(
+        name="prototype.create_artifact",
+        args={
+            "title": "포트폴리오",
+            "designPresetId": "vercel",
+            "files": {
+                "/src/App.tsx": (
+                    "import { Github, Linkedin } from 'lucide-react'; "
+                    "export default function App() { return <main><Github /><Linkedin /></main> }"
+                ),
+            },
+        },
+        enabled_toolsets=("prototype",),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "prototype_validation_failed"
+    assert "Github" in result["error"]["message"]
+    assert "lucide-react" in result["error"]["message"]
+    assert result["error"]["details"]["issues"][0]["suggestion"] == "react-icons/fa: FaGithub"
+    assert repository.calls == []
