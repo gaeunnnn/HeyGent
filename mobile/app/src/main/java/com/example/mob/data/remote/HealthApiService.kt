@@ -23,7 +23,6 @@ interface HealthApiService {
 
     @POST("api/v1/health/samsung")
     suspend fun sendSamsungHealthData(
-        @Header("Authorization") token: String,
         @Body request: SamsungHealthRequest
     ): ServerResponse<Unit>
 
