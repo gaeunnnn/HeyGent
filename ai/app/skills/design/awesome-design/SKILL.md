@@ -41,6 +41,8 @@ metadata:
 - `prototype.create_artifact`의 `designPresetId`에는 실제로 읽은 DESIGN.md의 `preset_id`를 반드시 넣는다. 빈 값, 임의 값, "DESIGN.md" 같은 일반명은 쓰지 않는다.
 - 코드 탭이나 프리뷰에서 다시 사용할 수 있도록 한 세션 안의 생성 코드는 같은 흐름으로 이어간다.
 - 런타임은 React, CSS, `lucide-react`, `motion`/`framer-motion`, `recharts`, Radix UI primitives, `react-resizable-panels`, `react-router`, `axios`, `d3`, `three`/`@react-three`, `gsap`, `lottie-react`, `animejs`, `react-icons`, `react-is`, `mapbox-gl`, `bootstrap`, `clsx`, `date-fns`, `sonner`, `vaul`, `zustand`를 기본 지원한다. 이 목록 밖의 외부 패키지가 꼭 필요하면 사용자에게 보이는 화면이 깨지지 않도록 순수 React/CSS fallback을 포함한다.
+- `Github`, `Linkedin`처럼 브랜드 로고 아이콘은 `lucide-react`에 있다고 추정하지 않는다. 브랜드 아이콘은 `react-icons/fa`를 사용하거나, `ExternalLink`, `GitBranch`, `Link`, `Mail` 같은 일반 `lucide-react` 아이콘으로 대체한다.
+- `prototype.create_artifact`가 `prototype_validation_failed`를 반환하면 완료로 보고하지 말고, 오류의 `details.issues`를 읽어 import/package/export 문제를 고친 뒤 `prototype.create_artifact`를 다시 호출한다.
 - Tailwind 빌드 파이프라인에 의존하지 않는다. Tailwind식 className만 나열하지 말고, DESIGN.md 토큰은 `src/styles.css`의 실제 CSS로 구현한다.
 - 폰트는 `font-family` fallback을 반드시 포함하고, 외부 폰트가 늦게 로드되거나 실패해도 레이아웃이 유지되게 한다.
 - 결과를 보고할 때는 실제 `prototype.create_artifact` 결과의 `artifactId`, `versionId`, `designPresetId`를 기준으로 말한다. 도구 호출 여부를 추측하거나, 이미 Artifact가 생성된 뒤에 스킬을 쓰지 않았다고 단정하지 않는다.

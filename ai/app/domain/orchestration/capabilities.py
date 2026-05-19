@@ -13,6 +13,7 @@ TOOL_RESULT_READER_SOURCE_TOOLSETS = {
     "delegation",
     "design",
     "file",
+    "gmail",
     "local-core",
     "messaging",
     "notion",

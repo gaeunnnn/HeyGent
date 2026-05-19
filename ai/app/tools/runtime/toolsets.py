@@ -52,6 +52,10 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
         description="Notion workspace proxy execution tools.",
         tools=("notion.execute",),
     ),
+    "gmail": RuntimeToolsetDefinition(
+        description="Gmail account proxy execution tools (read updates label, fetch messages, build newsletter digests).",
+        tools=("gmail.execute",),
+    ),
     "design": RuntimeToolsetDefinition(
         description="DESIGN.md preset inspection tools for prototype generation.",
         tools=("design.list_presets", "design.read_preset"),

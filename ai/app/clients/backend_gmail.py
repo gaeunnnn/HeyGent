@@ -35,14 +35,20 @@ class BackendGmailClient:
         )
 
         try:
-            with urlopen(request, timeout=self._settings.backend_memory_timeout_seconds) as response:
-                body = response.read(500_000).decode("utf-8", errors="replace")
+            # Gmail 명령은 여러 메시지 본문(format=full)을 batch 로 가져오는 경우가 많아 memory timeout(5초)보다
+            # 넉넉한 tool timeout(기본 10초+) 을 사용한다. Broken pipe 로 backend 가 응답 못 쓰는 경우 방지.
+            timeout = max(
+                float(self._settings.backend_tool_timeout_seconds or 10.0),
+                30.0,
+            )
+            with urlopen(request, timeout=timeout) as response:
+                body = response.read(2_000_000).decode("utf-8", errors="replace")
         except HTTPError as error:
             raise BackendGmailClientError(_backend_error_message(error)) from error
         except URLError as error:
             raise BackendGmailClientError(f"backend 연결 실패: {error.reason}") from error
         except TimeoutError as error:
-            raise BackendGmailClientError("backend Gmail 실행 요청이 시간 초과되었습니다.") from error
+            raise BackendGmailClientError("backend Gmail 실행 요청이 시간 초과되었습니다. 한 번에 가져오는 메시지 수를 줄여보세요.") from error
 
         try:
             wrapper = json.loads(body)

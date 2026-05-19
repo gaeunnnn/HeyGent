@@ -11,6 +11,7 @@ import {
   agentProfileToAgent,
 } from '@/apis/agents'
 import { useAgentCacheStore } from '@/store/useAgentCacheStore'
+import { useAgentVisualizationStore } from '@/store/useAgentVisualizationStore'
 import { useSessionStore } from '@/store/useSessionStore'
 import { SubAgentCreateDialog } from './SubAgentCreateDialog'
 import { SubAgentDraftForm } from './SubAgentDraftForm'
@@ -137,6 +138,11 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
             // 서브에이전트가 삭제됐으므로 캐시 무효화 — 다른 패널에서 stale 목록 안 보이도록.
             useAgentCacheStore.getState().invalidateSessionAgents(sessionId)
             removeAgentPanelFromSession(sessionId, detailItem.id)
+            if (detailItem.agent.spriteId) {
+              useAgentVisualizationStore
+                .getState()
+                .removeAgentFromVisualization(detailItem.agent.spriteId)
+            }
             resetDraft()
           }}
           onSave={(agent) => {
@@ -145,6 +151,21 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
             const previousAgent = detailItem.agent
             const optimisticAgent = { ...previousAgent, ...agent }
             updateAgentPanelInSession(sessionId, detailItem.id, optimisticAgent)
+            if (detailItem.agent.spriteId) {
+              useAgentVisualizationStore.getState().updateAgentInfo(detailItem.agent.spriteId, {
+                name: agent.name,
+                role: agent.role ?? previousAgent.role ?? '',
+                ...(agent.profileImage !== undefined ? { profileImage: agent.profileImage } : {}),
+              })
+            }
+            // 사용자가 textarea 에서 편집한 본문은 `agent.instructions` 에만 들어 있고
+            // `agent.instructionsFiles[documentKey]` 는 stale 인 경우가 많다 (textarea onChange 가
+            // files dict 를 동시에 갱신하지 않음). 그래서 저장 시점에 instructions 를 entry document
+            // key 위치에 덮어써 stale 값이 백엔드로 가지 않도록 한다.
+            const mergedFiles: Record<string, string> = {
+              ...(agent.instructionsFiles ?? {}),
+              [documentKey]: agent.instructions ?? '',
+            }
             return updateSessionAgent(sessionId, detailItem.id, {
               name: agent.name,
               role: agent.role ?? 'general',
@@ -155,9 +176,7 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
               profileImage: agent.profileImage,
               skills: agent.skills,
               entryDocumentKey: documentKey,
-              instructionsFiles: agent.instructionsFiles ?? {
-                [documentKey]: agent.instructions ?? '',
-              },
+              instructionsFiles: mergedFiles,
             })
               .then((profile) => {
                 // 서브에이전트 설정이 수정됐으므로 캐시 무효화 — 다음 패널 진입 때 fresh 받음.

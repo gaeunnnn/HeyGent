@@ -27,6 +27,7 @@ Return strict JSON only, with this shape:
 Rules:
 - Skip recall for greetings, thanks, or trivial requests. If user or project history could change, personalize, or improve the answer, recall it even when the current input is answerable on its own.
 - Use USER_PROFILE/PREFERENCE/GLOBAL/preference for stable user style, format, or preference.
+- Requests about what to call the user, preferred name, nickname, addressing, likes, dislikes, or saved personal preferences should recall USER_PROFILE/PREFERENCE/GLOBAL/preference.
 - Use USER_PROFILE/PROFILE/GLOBAL/profile for user role, identity, or working habit.
 - Do not skip open-ended recommendations, suggestions, choices, or "what should I do/eat/use" questions. These should recall USER_PROFILE/PREFERENCE/GLOBAL/preference because preferences may materially change the answer.
 - Use AGENT_MEMORY/FACT/GLOBAL/event,fact,reason for recent events, temporary constraints, health/diet restrictions, situational limitations, or other non-durable facts that should affect the current recommendation.
