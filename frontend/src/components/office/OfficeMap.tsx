@@ -35,6 +35,7 @@ interface OfficeMapProps {
   obstacleLines?: Rect[]
   onNewLine?: (line: Rect) => void
   onAgentClick?: (agentId: string, event: { clientX: number; clientY: number }) => void
+  onEmptyClick?: () => void
   agentInfoMap?: Record<string, AgentVisualizationInfo>
   selectedAgentId?: string | null
   spawningIds?: ReadonlySet<string>
@@ -54,6 +55,7 @@ export function OfficeMap({
   obstacleLines,
   onNewLine,
   onAgentClick,
+  onEmptyClick,
   agentInfoMap,
   selectedAgentId,
   spawningIds,
@@ -128,6 +130,8 @@ export function OfficeMap({
       }
       return
     }
+
+    onEmptyClick?.()
   }
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {

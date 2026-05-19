@@ -192,10 +192,7 @@ class SamsungHealthManager(private val context: Context) {
                 bloodGlucose = snapshot.bloodGlucose
             )
 
-            val response = RetrofitClient.healthApiService.sendSamsungHealthData(
-                "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzc3NDQ1NDc3fQ.nh81Tab99RrJptEEydc0tbyQ7nyEUiPDnHf0kgCRqXY",
-                request
-            )
+            val response = RetrofitClient.healthApiService.sendSamsungHealthData(request)
             if (response.status == 200) {
                 Log.d("SamsungHealth", "서버 전송 성공: ${response.message}")
             } else {

@@ -23,6 +23,7 @@ interface AgentVisualizationState {
   selectAgent: (agentId: string | null) => void
   setAgentRuntimes: (updater: AgentRuntime[] | ((prev: AgentRuntime[]) => AgentRuntime[])) => void
   addSpawnedKey: (id: string) => void
+  removeAgentFromVisualization: (spriteId: string) => void
   // 세션 전환 시 호출 — 이전 세션 에이전트 잔상 제거 (같은 세션 재진입이면 상태 유지)
   clearVisualizationState: (newSessionId?: string | null) => void
   startCeoWork: (taskRunId?: string, sessionId?: string | null) => void
@@ -673,6 +674,17 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
     set((state) => ({
       spawnedKeys: state.spawnedKeys.includes(id) ? state.spawnedKeys : [...state.spawnedKeys, id],
     })),
+
+  removeAgentFromVisualization: (spriteId) =>
+    set((state) => {
+      const nextInfoMap = { ...state.agentInfoMap }
+      delete nextInfoMap[spriteId]
+      return {
+        agentInfoMap: nextInfoMap,
+        agentRuntimes: state.agentRuntimes.filter((agent) => agent.config.id !== spriteId),
+        spawnedKeys: state.spawnedKeys.filter((key) => key !== spriteId),
+      }
+    }),
 
   clearVisualizationState: (newSessionId) =>
     set((state) => {

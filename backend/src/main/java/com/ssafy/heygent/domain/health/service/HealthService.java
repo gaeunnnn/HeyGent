@@ -1,6 +1,8 @@
 package com.ssafy.heygent.domain.health.service;
 
 import com.ssafy.heygent.domain.health.dto.request.SamsungHealthRequestDto;
+import com.ssafy.heygent.domain.health.dto.request.HealthExecuteCommandRequest;
+import com.ssafy.heygent.domain.health.dto.response.HealthExecuteCommandResponse;
 import com.ssafy.heygent.domain.health.dto.response.HealthSummaryResponseDto;
 import com.ssafy.heygent.domain.health.entity.*;
 import com.ssafy.heygent.domain.health.repository.MeasurementLogRepository;
@@ -11,7 +13,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
+import java.util.stream.IntStream;
 
 @Service
 @RequiredArgsConstructor
@@ -35,7 +39,7 @@ public class HealthService {
 
         DailyActivity activity = DailyActivity.builder()
                 .measurementLog(mainLog)
-                .stepCount(dto.getSteps().intValue())
+                .stepCount(dto.getSteps() != null ? dto.getSteps().intValue() : null)
                 .activeMinutes(dto.getActiveTimeMinutes())
                 .totalCalories(dto.getCaloriesBurned())
                 .activeCalories(dto.getActiveCalories())
@@ -50,8 +54,8 @@ public class HealthService {
         VitalLog vital = VitalLog.builder()
                 .measurementLog(mainLog)
                 .heartRateBpm(dto.getHeartRate())
-                .systolicBp(dto.getBloodPressureSystolic().doubleValue())
-                .diastolicBp(dto.getBloodPressureDiastolic().doubleValue())
+                .systolicBp(dto.getBloodPressureSystolic())
+                .diastolicBp(dto.getBloodPressureDiastolic())
                 .build();
 
         SleepRecord sleep = SleepRecord.builder()
@@ -69,5 +73,43 @@ public class HealthService {
     public Optional<HealthSummaryResponseDto> getLatestHealthData(Long userId) {
         return logRepository.findTopByUser_IdOrderByMeasuredAtDesc(userId)
                 .map(HealthSummaryResponseDto::from);
+    }
+
+    @Transactional(readOnly = true)
+    public List<HealthExecuteCommandResponse> executeBatch(
+            Long userId,
+            List<HealthExecuteCommandRequest> commands
+    ) {
+        return IntStream.range(0, commands.size())
+                .mapToObj(index -> executeCommand(userId, index, commands.get(index)))
+                .toList();
+    }
+
+    private HealthExecuteCommandResponse executeCommand(
+            Long userId,
+            int index,
+            HealthExecuteCommandRequest command
+    ) {
+        String method = command.getMethod() == null ? "" : command.getMethod().trim().toUpperCase();
+        String endpoint = command.getEndpoint() == null ? "" : command.getEndpoint().trim();
+
+        if (!"GET".equals(method) || !"/api/v1/health/me/latest".equals(endpoint)) {
+            return HealthExecuteCommandResponse.failure(
+                    index,
+                    userId,
+                    method,
+                    endpoint,
+                    "unsupported_health_command",
+                    "지원하지 않는 Health 명령입니다."
+            );
+        }
+
+        return HealthExecuteCommandResponse.success(
+                index,
+                userId,
+                method,
+                endpoint,
+                getLatestHealthData(userId).orElse(null)
+        );
     }
 }

@@ -43,6 +43,7 @@ _PUBLIC_SESSION_SOURCE = "api.session"
 _TASK_TRANSCRIPT_SOURCE = "agent.loop"
 _ACTIVE_TASK_STATUSES = [status.value for status in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.WAITING, TaskStatus.BLOCKED)]
 _TERMINAL_TASK_STATUSES = {status.value for status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELED)}
+_ACTIVE_DIRECT_RUN_TTL_SECONDS = 300
 _SESSION_MESSAGES_LIST_RESULT_TYPE = "session.messages.list.result"
 _TASK_RUNS_ACTIVE_LIST_RESULT_TYPE = "taskRuns.active.list.result"
 _PROTECTED_SESSION_METADATA_KEYS = {
@@ -921,8 +922,18 @@ class WebSocketCommandRouter:
                     repository=repository,
                 )
 
-        total = repository.count_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_id)
-        for task in repository.list_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_id, limit=max(total, 1), offset=0):
+        total = repository.count_tasks_by_statuses(
+            _ACTIVE_TASK_STATUSES,
+            session_key=session_id,
+            owner_key=context.auth.user_id,
+        )
+        for task in repository.list_tasks_by_statuses(
+            _ACTIVE_TASK_STATUSES,
+            session_key=session_id,
+            owner_key=context.auth.user_id,
+            limit=max(total, 1),
+            offset=0,
+        ):
             if task.task_run_id in items_by_task_run_id or str(task.owner_key) != str(context.auth.user_id):
                 continue
             if not _is_live_active_task(repository, task):
@@ -2162,10 +2173,19 @@ def _is_sidebar_active_task(task: Any) -> bool:
 
 def _is_live_active_task(repository: Any, task: Any) -> bool:
     liveness = classify_task_run_liveness(task)
+    if liveness.reason == "direct_run_without_supervisor_claim" and _is_active_direct_run_stale(task):
+        return False
     if liveness.blocks_session:
         return True
     _recover_stale_task_if_needed(repository, task, liveness=liveness)
     return False
+
+
+def _is_active_direct_run_stale(task: Any) -> bool:
+    updated_at = getattr(task, "updated_at", None)
+    if not isinstance(updated_at, datetime):
+        return False
+    return (utc_now() - updated_at).total_seconds() > _ACTIVE_DIRECT_RUN_TTL_SECONDS
 
 
 def _recover_stale_task_if_needed(repository: Any, task: Any, *, liveness: Any | None = None) -> None:

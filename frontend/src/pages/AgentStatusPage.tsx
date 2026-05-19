@@ -1713,7 +1713,7 @@ export function AgentStatusPage() {
   }
 
   useVisualizationSync(handleMove, sessionId, profileIdMap)
-  useAgentInfoSync(sessionId, profileIdMap)
+  useAgentInfoSync(sessionId, profileIdMap, agentPanels)
 
   // handleMove는 매 렌더마다 새로 생성되므로 타이머 콜백에서는 항상 최신 버전을 참조
   const handleMoveRef = useRef(handleMove)
@@ -1956,6 +1956,7 @@ export function AgentStatusPage() {
         onAgentArrived={handleAgentArrived}
         ceoMode={null}
         onAgentClick={handleAgentClickWithMenu}
+        onEmptyClick={() => selectAgent(null)}
         agentInfoMap={agentInfoMap}
         selectedAgentId={selectedAgentId}
         spawningIds={spawningIds}

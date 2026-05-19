@@ -251,6 +251,17 @@ def test_runtime_exposes_notion_execute_only_for_notion_toolset():
     assert "notion.execute" not in resolve_runtime_tool_names(("local-core",))
 
 
+def test_runtime_exposes_health_execute_only_for_health_toolset():
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
+
+    definitions = runtime.list_tool_definitions(enabled_toolsets=("health",))
+
+    assert [definition["name"] for definition in definitions] == ["health.execute"]
+    schema = definitions[0]["schema"]
+    assert "commands" in schema["parameters"]["properties"]
+    assert "health.execute" not in resolve_runtime_tool_names(("local-core",))
+
+
 def test_notion_runtime_binds_owner_user_id_and_ignores_model_user_id(monkeypatch):
     captured = {}
 
@@ -276,6 +287,37 @@ def test_notion_runtime_binds_owner_user_id_and_ignores_model_user_id(monkeypatc
             ],
         },
         enabled_toolsets=("notion",),
+    )
+
+    assert result["ok"] is True
+    assert captured["_trusted_user_id"] == "7"
+    assert "userId" not in captured
+
+
+def test_health_runtime_binds_owner_user_id_and_ignores_model_user_id(monkeypatch):
+    captured = {}
+
+    def fake_execute_health_handler(args):
+        captured.update(args)
+        return {"ok": True, "results": []}
+
+    from app.tools.health import health_tool
+
+    monkeypatch.setattr(health_tool, "execute_health_handler", fake_execute_health_handler)
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore()).bind_request_context(owner_key="7")
+
+    result = runtime.run_call(
+        name="health.execute",
+        args={
+            "userId": 999,
+            "commands": [
+                {
+                    "method": "GET",
+                    "endpoint": "/api/v1/health/me/latest",
+                }
+            ],
+        },
+        enabled_toolsets=("health",),
     )
 
     assert result["ok"] is True

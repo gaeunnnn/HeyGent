@@ -152,19 +152,35 @@ class InMemoryTaskRepository:
     def count_tasks(self, *, status: str | None = None, session_key: str | None = None) -> int:
         return len(self._filter_tasks(statuses=[status] if status else None, session_key=session_key))
 
-    def list_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None, limit: int = 50, offset: int = 0) -> list[TaskRun]:
-        tasks = self._filter_tasks(statuses=statuses, session_key=session_key)
+    def list_tasks_by_statuses(
+        self,
+        statuses: list[str],
+        *,
+        session_key: str | None = None,
+        owner_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[TaskRun]:
+        tasks = self._filter_tasks(statuses=statuses, session_key=session_key, owner_key=owner_key)
         return deepcopy(tasks[offset : offset + limit])
 
-    def count_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None) -> int:
-        return len(self._filter_tasks(statuses=statuses, session_key=session_key))
+    def count_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None, owner_key: str | None = None) -> int:
+        return len(self._filter_tasks(statuses=statuses, session_key=session_key, owner_key=owner_key))
 
-    def _filter_tasks(self, *, statuses: list[str] | None = None, session_key: str | None = None) -> list[TaskRun]:
+    def _filter_tasks(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        session_key: str | None = None,
+        owner_key: str | None = None,
+    ) -> list[TaskRun]:
         status_set = set(statuses or [])
         tasks = [
             task
             for task in self.tasks.values()
-            if (not status_set or task.status in status_set) and (session_key is None or task.session_key == session_key)
+            if (not status_set or task.status in status_set)
+            and (session_key is None or task.session_key == session_key)
+            and (owner_key is None or str(task.owner_key) == str(owner_key))
         ]
         return sorted(tasks, key=lambda task: task.created_at or utc_now(), reverse=True)
 
