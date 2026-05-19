@@ -217,7 +217,10 @@ export function SubAgentsPanel({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <SubAgentsPanelShell title="에이전트" description="세션 에이전트 설정">
+    <SubAgentsPanelShell
+      title="서브 에이전트"
+      description="이 세션에서 팀장 에이전트가 호출할 수 있는 에이전트를 구성합니다."
+    >
       {loadError && (
         <p className="text-destructive border-destructive/30 mb-3 rounded-md border px-3 py-2 text-xs">
           {loadError}
