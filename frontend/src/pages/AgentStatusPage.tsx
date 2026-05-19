@@ -1499,6 +1499,25 @@ export function AgentStatusPage() {
 
       const agent = prev.find((a) => a.config.id === agentId)
       if (!agent) return prev
+
+      // 작업 중인 서브에이전트에게 rest 명령은 무시 — 작업 완료 전까지 작업 공간 유지.
+      // 1차(agentInfoMap) + 2차(taskRunsById 직접 검증) 이중 잠금.
+      if (destination === 'rest' && agentId !== 'ceo') {
+        const info = useAgentVisualizationStore.getState().agentInfoMap[agentId]
+        if (info?.activityStatus === 'working') return prev
+        // agentInfoMap이 찰나로 'idle'로 보이는 경우를 대비한 2차 검증
+        const { taskRunsById: curRuns } = useTaskRunStore.getState()
+        const isStillWorking = Object.values(curRuns).some((tr) => {
+          const actorAgent = tr.displayContext?.actorAgent
+          if (!actorAgent || actorAgent.kind === 'main') return false
+          const spriteId = profileIdMap[actorAgent.profileId ?? '']
+          if (spriteId !== agentId) return false
+          const s = tr.status?.toUpperCase()
+          return s === 'RUNNING' || s === 'WAITING' || s === 'BLOCKED' || s === 'PENDING'
+        })
+        if (isStillWorking) return prev
+      }
+
       if (agentId === 'ceo' && rawDestination === 'rest') {
         const deskPosition = agent.config.destinations.desk
         if (!deskPosition) return prev
@@ -1553,22 +1572,22 @@ export function AgentStatusPage() {
       }
 
       if (agent.state === 'walking') {
-        // 이동 중 목적지 변경: 경로는 유지하고 도착 시 전환할 targetState만 갱신
-        // rest는 소파 빈 자리 탐색이 필요해 mid-walk 갱신 불가 — 나머지만 처리
-        // 휴게 목적지(소파/플로어)로 이동 중에는 targetState 덮어쓰기 금지 — sitting_desk가 소파 좌표에 배치되는 문제 방지
-        if (destination !== 'rest') {
-          const isWalkingToRest =
-            agent.targetState === 'sitting_sofa' || agent.targetState === 'sitting_floor_lean'
-          if (!isWalkingToRest) {
-            const newTargetState = DESTINATION_MAP[destination as UIDestination]?.targetState
-            if (newTargetState && agent.targetState !== newTargetState) {
-              return prev.map((a) =>
-                a.config.id === agentId ? { ...a, targetState: newTargetState } : a,
-              )
-            }
+        // 이동 중 목적지 변경
+        if (destination === 'rest') return prev
+        const isWalkingToRest =
+          agent.targetState === 'sitting_sofa' || agent.targetState === 'sitting_floor_lean'
+        if (!isWalkingToRest) {
+          // 휴게 목적지(소파/플로어)로 이동 중에는 targetState 덮어쓰기 금지 — sitting_desk가 소파 좌표에 배치되는 문제 방지
+          const newTargetState = DESTINATION_MAP[destination as UIDestination]?.targetState
+          if (newTargetState && agent.targetState !== newTargetState) {
+            return prev.map((a) =>
+              a.config.id === agentId ? { ...a, targetState: newTargetState } : a,
+            )
           }
+          return prev
         }
-        return prev
+        // 휴게 목적지로 이동 중 비-휴게 명령 수신 → 휴게행 중단, 현재 위치에서 재경로 탐색
+        // agent.position은 마지막 CSS 전환 시작점 기준 — 거기서 새 경로 계산
       }
 
       // 이미 휴게 상태면 아무것도 하지 않음 — 페이지 재진입 시 불필요한 걷기 방지
@@ -1577,6 +1596,19 @@ export function AgentStatusPage() {
         (agent.state === 'sitting_sofa' || agent.state === 'sitting_floor_lean')
       ) {
         return prev
+      }
+
+      // 이미 책상에 앉아있고 같은 책상 명령이 반복 오면 무시 — 반복 호출에 의한 micro-walk 방지
+      // (한 책상에 2명이 공유하므로 isSpotOccupied 체크 없이 본인 좌표 근접 여부만 판단)
+      if (destination === 'desk' && agent.state === 'sitting_desk') {
+        const deskDest = agent.config.destinations.desk
+        if (
+          deskDest &&
+          Math.abs(agent.position.x - deskDest.x) < CELL * 2 &&
+          Math.abs(agent.position.y - deskDest.y) < CELL * 2
+        ) {
+          return prev
+        }
       }
 
       // ── rest → 소파 빈 자리 우선 배정, 둘 다 차면 floorLean ──────────────
@@ -1778,10 +1810,12 @@ export function AgentStatusPage() {
     // CSS transition 의 from 값이 없고 onTransitionEnd 가 영원히 발화하지 않는다.
     // 별도 useEffect 가 다음 paint 사이클에 handleMove 를 호출해 walking 을 시작한다.
     if (elevatorSubs.length > 0) {
-      elevatorSubs.forEach(([, spriteId]) => addSpawnedKey(spriteId))
+      const elevatorSpriteIds = elevatorSubs.map(([, spriteId]) => spriteId)
+      elevatorSpriteIds.forEach((spriteId) => addSpawnedKey(spriteId))
+      setSpawningIds((s) => new Set([...s, ...elevatorSpriteIds]))
       setAgents((prev) => {
         const newAgents: AgentRuntime[] = []
-        for (const [, spriteId] of elevatorSubs) {
+        for (const spriteId of elevatorSpriteIds) {
           const config = AGENT_CONFIGS.find((c) => c.id === spriteId)
           if (!config || prev.some((a) => a.config.id === spriteId)) continue
           newAgents.push({
@@ -1800,31 +1834,31 @@ export function AgentStatusPage() {
         return [...prev, ...newAgents]
       })
     }
-  }, [profileIdMap, setAgents, addSpawnedKey])
+  }, [profileIdMap, setAgents, addSpawnedKey, setSpawningIds])
 
-  // idle 상태로 spawn 된 에이전트는 브라우저가 실제로 paint 한 후에 walking 으로 전환한다.
-  // useEffect 만으로는 React 가 idle commit 과 walking commit 을 한 paint 로 묶을 수 있다.
-  // requestAnimationFrame 두 번으로 paint 한 번을 사이에 끼워 CSS transition 의 from 좌표를 보장한다.
   const idleAgentIds = useAgentVisualizationStore((s) =>
     s.agentRuntimes
       .filter((a) => a.state === 'idle')
       .map((a) => a.config.id)
       .join(','),
   )
+  // 3초 후 agentInfoMap이 확정된 시점에 이동 방향 결정
+  // — 즉시 실행 시 agentInfoMap이 미갱신 상태여서 작업 중인데 rest로 보내는 경쟁조건 발생
   useEffect(() => {
     if (idleAgentIds === '') return
-    let inner: number | null = null
-    const outer = requestAnimationFrame(() => {
-      inner = requestAnimationFrame(() => {
-        for (const agentId of idleAgentIds.split(',')) {
-          handleMoveRef.current(agentId, 'rest')
-        }
-      })
-    })
-    return () => {
-      cancelAnimationFrame(outer)
-      if (inner !== null) cancelAnimationFrame(inner)
-    }
+    const timers = idleAgentIds.split(',').map((agentId) =>
+      setTimeout(() => {
+        setSpawningIds((s) => {
+          const n = new Set(s)
+          n.delete(agentId)
+          return n
+        })
+        const { agentInfoMap } = useAgentVisualizationStore.getState()
+        const isWorking = agentInfoMap[agentId]?.activityStatus === 'working'
+        handleMoveRef.current(agentId, isWorking ? 'desk' : 'rest')
+      }, 3000),
+    )
+    return () => timers.forEach(clearTimeout)
   }, [idleAgentIds])
 
   // 팀장 상태 구독 — explain 타이머 조건 판단에 사용

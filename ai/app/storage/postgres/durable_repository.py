@@ -11,6 +11,12 @@ from app.domain.orchestration.run_lifecycle import classify_task_run_liveness
 from app.domain.tasks.models import StepRun, TaskRun
 
 
+_ACTIVE_TASK_STATUSES = {"PENDING", "RUNNING", "WAITING", "BLOCKED"}
+_TERMINAL_TASK_STATUSES = {"COMPLETED", "FAILED", "CANCELED"}
+_ACTIVE_QUEUE_STATUSES = {"queued", "claimed", "running", "waiting", "failed_retry"}
+_TERMINAL_QUEUE_STATUSES = {"terminal", "canceled"}
+
+
 class PostgresDurableRepository:
     """Postgres durable anchor와 worker handoff를 다루는 최소 repository다."""
 
@@ -380,16 +386,61 @@ class PostgresTaskRepository(PostgresDurableRepository):
     def count_tasks(self, *, status: str | None = None, session_key: str | None = None) -> int:
         return len(self.list_tasks(status=status, session_key=session_key, limit=1_000_000, offset=0))
 
-    def list_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None, limit: int = 50, offset: int = 0) -> list[TaskRun]:
+    def list_tasks_by_statuses(
+        self,
+        statuses: list[str],
+        *,
+        session_key: str | None = None,
+        owner_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[TaskRun]:
         if not statuses:
             return []
-        tasks = [task for task in self._load_all_tasks() if task.status in set(statuses)]
-        if session_key is not None:
-            tasks = [task for task in tasks if task.session_key == session_key]
-        return tasks[offset : offset + limit]
+        where_sql, params = _task_status_filter_sql(statuses, session_key=session_key, owner_key=owner_key)
+        connection = self.connection_factory()
+        rows = connection.execute(
+            f"""
+            SELECT
+                task_run_id, owner_key, session_key, current_step_run_id,
+                queue_status, claim_owner, queued_at, claimed_at,
+                lease_expires_at, heartbeat_at, next_attempt_at,
+                attempts, last_claim_error, revision, updated_at, anchor_payload
+            FROM run_anchors
+            WHERE {where_sql}
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (*params, max(1, int(limit)), max(0, int(offset))),
+        ).fetchall()
+        tasks: list[TaskRun] = []
+        for row in rows:
+            normalized = _normalize_row(row) or {}
+            task = _task_from_payload((normalized.get("anchor_payload") or {}).get("task"))
+            if task is None:
+                continue
+            _apply_anchor_queue_fields(task, normalized)
+            tasks.append(task)
+        return tasks
 
-    def count_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None) -> int:
-        return len(self.list_tasks_by_statuses(statuses, session_key=session_key, limit=1_000_000, offset=0))
+    def count_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None, owner_key: str | None = None) -> int:
+        if not statuses:
+            return 0
+        where_sql, params = _task_status_filter_sql(statuses, session_key=session_key, owner_key=owner_key)
+        connection = self.connection_factory()
+        row = connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM run_anchors
+            WHERE {where_sql}
+            """,
+            tuple(params),
+        ).fetchone()
+        if row is None:
+            return 0
+        if isinstance(row, dict):
+            return int(row.get("count") or row.get("count(*)") or 0)
+        return int(row[0] or 0)
 
     def create_step(self, step: StepRun) -> StepRun:
         now_dt = utc_now()
@@ -771,6 +822,58 @@ def _required(payload: dict[str, Any], key: str) -> Any:
     if value in {None, ""}:
         raise ValueError(f"{key} is required")
     return value
+
+
+def _task_status_filter_sql(
+    statuses: list[str],
+    *,
+    session_key: str | None = None,
+    owner_key: str | None = None,
+) -> tuple[str, tuple[Any, ...]]:
+    normalized_statuses = sorted({str(status).upper() for status in statuses if str(status).strip()})
+    if not normalized_statuses:
+        return "FALSE", ()
+    status_placeholders = ", ".join(["%s"] * len(normalized_statuses))
+    clauses = [f"anchor_payload->'task'->>'status' IN ({status_placeholders})"]
+    params: list[Any] = list(normalized_statuses)
+
+    durable_statuses = _durable_statuses_for_task_statuses(normalized_statuses)
+    if durable_statuses:
+        durable_placeholders = ", ".join(["%s"] * len(durable_statuses))
+        clauses.append(f"durable_status IN ({durable_placeholders})")
+        params.extend(durable_statuses)
+
+    queue_statuses = _queue_statuses_for_task_statuses(normalized_statuses)
+    if queue_statuses:
+        queue_placeholders = ", ".join(["%s"] * len(queue_statuses))
+        clauses.append(f"queue_status IN ({queue_placeholders})")
+        params.extend(queue_statuses)
+
+    if owner_key is not None:
+        clauses.append("owner_key = %s")
+        params.append(owner_key)
+    if session_key is not None:
+        clauses.append("session_key = %s")
+        params.append(session_key)
+    return " AND ".join(clauses), tuple(params)
+
+
+def _durable_statuses_for_task_statuses(statuses: list[str]) -> list[str]:
+    durable_statuses: set[str] = set()
+    for status in statuses:
+        durable_statuses.add(_durable_status(status))
+    return sorted(durable_statuses)
+
+
+def _queue_statuses_for_task_statuses(statuses: list[str]) -> list[str]:
+    status_set = set(statuses)
+    queue_statuses: set[str] = set()
+    if status_set & _ACTIVE_TASK_STATUSES:
+        # active 목록은 기존 partial index 조건과 같은 queue_status 범위로 먼저 좁힌다.
+        queue_statuses.update(_ACTIVE_QUEUE_STATUSES)
+    if status_set & _TERMINAL_TASK_STATUSES:
+        queue_statuses.update(_TERMINAL_QUEUE_STATUSES)
+    return sorted(queue_statuses)
 
 
 def _json(value: Any) -> str:

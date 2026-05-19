@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -33,10 +33,24 @@ import {
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { HelpHint } from '@/components/ui/help-hint'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import type { AgentRunItemData } from '@/components/sessionWorkspace/agentRuns/types'
 import { parseServerTimestamp } from '@/components/sessionWorkspace/agentUsageDisplay'
+import {
+  createCustomSkill,
+  generateCustomSkillDraft,
+  importCustomSkillFromUrl,
+  type CustomSkillDraft,
+  type SkillCatalogItem,
+} from '@/apis/agents'
 
 export interface AgentSummaryItemData {
   label: string
@@ -726,6 +740,7 @@ export function AgentSkillsLibraryPanel({
   adapterLabel,
   applicationLabel,
   missingSkills = [],
+  onSkillCreated,
   onSkillOpen,
   onSkillReorder,
   onSkillToggle,
@@ -738,6 +753,7 @@ export function AgentSkillsLibraryPanel({
   adapterLabel: string
   applicationLabel: string
   missingSkills?: string[]
+  onSkillCreated?: (skill: SkillCatalogItem) => void
   onSkillOpen?: (key: string) => void
   onSkillReorder?: (orderedSkillIds: string[]) => void
   onSkillToggle?: (key: string, checked: boolean) => void
@@ -757,6 +773,7 @@ export function AgentSkillsLibraryPanel({
   const [draggingSkillKey, setDraggingSkillKey] = useState<string | null>(null)
   const [skillSearch, setSkillSearch] = useState('')
   const [unmanagedOpen, setUnmanagedOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
   const saveStatusLabel = saving ? 'Saving changes...' : null
   const normalizedSkillSearch = normalizeSkillSearch(skillSearch)
   const filteredEnabledRows = filterSkillRows(enabledRows, normalizedSkillSearch)
@@ -856,14 +873,26 @@ export function AgentSkillsLibraryPanel({
           onDragEnd={handleDragEnd}
           onDragCancel={() => setDraggingSkillKey(null)}
         >
-          <div className="relative">
-            <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2" />
-            <input
-              value={skillSearch}
-              className={`${agentTextInputClass} pl-8 font-sans`}
-              placeholder="스킬 검색"
-              onChange={(event) => setSkillSearch(event.target.value)}
-            />
+          <div className="flex min-w-0 gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2" />
+              <input
+                value={skillSearch}
+                className={`${agentTextInputClass} pl-8 font-sans`}
+                placeholder="스킬 검색"
+                onChange={(event) => setSkillSearch(event.target.value)}
+              />
+            </div>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              className="h-9 w-9 shrink-0"
+              onClick={() => setCreateOpen(true)}
+              aria-label="스킬 추가"
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
           </div>
           <section className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-start">
             <AgentSkillTransferColumn
@@ -971,6 +1000,15 @@ export function AgentSkillsLibraryPanel({
           <AgentInlineSummary label="선택한 스킬" value={selectedCount} />
         </div>
       </section>
+
+      <CreateSkillDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={(skill) => {
+          onSkillCreated?.(skill)
+          setSelectedSkillKey(skill.skillId)
+        }}
+      />
     </div>
   )
 }
@@ -987,6 +1025,690 @@ export function AgentSectionCard({ title, children }: { title: string; children:
 const agentTextInputClass =
   'border-border placeholder:text-muted-foreground/40 focus-visible:ring-ring w-full rounded-md border bg-transparent px-2.5 py-1.5 font-mono text-sm outline-none focus-visible:ring-2'
 
+function CreateSkillDialog({
+  open,
+  onCreated,
+  onOpenChange,
+}: {
+  open: boolean
+  onCreated: (skill: SkillCatalogItem) => void
+  onOpenChange: (open: boolean) => void
+}) {
+  const [step, setStep] = useState<SkillWizardStep>('entry')
+  const [source, setSource] = useState<'ai' | 'url' | null>(null)
+  const [aiGoal, setAiGoal] = useState('')
+  const [url, setUrl] = useState('')
+  const [draft, setDraft] = useState<SkillDraftForm | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const draftRequestingRef = useRef(false)
+  const canSave = draft !== null && draft.displayName.trim() !== '' && !saving
+
+  const reset = () => {
+    setStep('entry')
+    setSource(null)
+    setAiGoal('')
+    setUrl('')
+    setDraft(null)
+    setSaving(false)
+    setGenerating(false)
+    draftRequestingRef.current = false
+    setError(null)
+  }
+
+  const closeDialog = () => {
+    reset()
+    onOpenChange(false)
+  }
+
+  const createDraftFromAi = async () => {
+    if (draftRequestingRef.current) return
+    if (!aiGoal.trim()) {
+      setError('만들고 싶은 스킬의 용도를 적어주세요.')
+      return
+    }
+    draftRequestingRef.current = true
+    setError(null)
+    setGenerating(true)
+    setStep('generating')
+    try {
+      const generated = await generateCustomSkillDraft({ goal: aiGoal })
+      setDraft(skillDraftToForm(generated))
+      setStep('basic')
+    } catch {
+      setStep('aiInput')
+      setError('초안을 만들지 못했어요. 잠시 후 다시 시도하세요.')
+    } finally {
+      draftRequestingRef.current = false
+      setGenerating(false)
+    }
+  }
+
+  const createDraftFromUrl = async () => {
+    if (draftRequestingRef.current) return
+    if (!url.trim()) {
+      setError('가져올 URL을 입력하세요.')
+      return
+    }
+    draftRequestingRef.current = true
+    setError(null)
+    setGenerating(true)
+    setStep('generating')
+    try {
+      const imported = await importCustomSkillFromUrl({ url })
+      setDraft(skillDraftToForm(imported))
+      setStep('basic')
+    } catch {
+      setStep('urlInput')
+      setError('URL을 읽지 못했어요. 공개된 문서 주소인지 확인하고 다시 시도하세요.')
+    } finally {
+      draftRequestingRef.current = false
+      setGenerating(false)
+    }
+  }
+
+  const handleSubmit = async () => {
+    if (!draft) return
+    setSaving(true)
+    setError(null)
+    try {
+      const created = await createCustomSkill({
+        name: normalizeCustomSkillName(draft.key || draft.displayName),
+        displayName: draft.displayName.trim(),
+        description: draft.description.trim(),
+        body: draft.rawEdited ? draft.rawBody : buildSkillBody(draft),
+        documents: draft.references
+          .filter((reference) => reference.title.trim() && reference.content.trim())
+          .map((reference, index) => ({
+            documentKey: referenceDocumentKey(reference, index),
+            title: reference.title.trim(),
+            content: reference.content.trim(),
+          })),
+      })
+      onCreated(created)
+      closeDialog()
+    } catch {
+      setError('저장하지 못했어요. 잠시 후 다시 시도하세요.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) onOpenChange(true)
+        else closeDialog()
+      }}
+    >
+      <DialogContent className="max-h-[86vh] max-w-3xl overflow-hidden p-0">
+        <DialogHeader className="border-border border-b px-5 py-4">
+          <DialogTitle>스킬 추가</DialogTitle>
+          <DialogDescription>에이전트가 반복해서 따를 작업 방식을 만듭니다.</DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[70vh] overflow-y-auto px-5 py-4">
+          {isDraftStep(step) ? <SkillWizardSteps current={step} /> : null}
+
+          {step === 'entry' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="어떻게 시작할까요?"
+                description="먼저 초안을 만드는 방법을 고르세요. 저장 전까지 현재 에이전트에는 적용되지 않습니다."
+              />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  className="border-primary/30 bg-primary/5 hover:bg-primary/10 rounded-lg border p-4 text-left transition-colors"
+                  onClick={() => {
+                    setSource('ai')
+                    setStep('aiInput')
+                    setError(null)
+                  }}
+                >
+                  <div className="text-base font-semibold">AI로 만들기</div>
+                  <p className="text-muted-foreground mt-2 text-sm leading-6">
+                    어떤 일을 맡길지 적으면 스킬 초안을 만들어요.
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  className="border-border hover:bg-accent/40 rounded-lg border p-4 text-left transition-colors"
+                  onClick={() => {
+                    setSource('url')
+                    setStep('urlInput')
+                    setError(null)
+                  }}
+                >
+                  <div className="text-base font-semibold">URL로 가져오기</div>
+                  <p className="text-muted-foreground mt-2 text-sm leading-6">
+                    공개 문서나 페이지 주소를 읽어 초안으로 바꿔요.
+                  </p>
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {step === 'aiInput' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="무슨 용도로 쓰고 싶나요?"
+                description="어떤 상황에서 어떤 결과를 더 잘 만들고 싶은지 적어주세요."
+              />
+              <label className="space-y-2">
+                <span className="text-sm font-medium">스킬 용도</span>
+                <textarea
+                  value={aiGoal}
+                  onChange={(event) => setAiGoal(event.target.value)}
+                  className={`${agentTextInputClass} min-h-[220px] resize-y font-sans leading-6`}
+                  placeholder="예: QA가 결제 오류 리포트를 빠르게 분류하고 재현 절차를 남기기 위한 스킬"
+                />
+              </label>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {[
+                  '프론트엔드 PR에서 접근성, 상태 처리, 에러 처리를 점검하기 위한 스킬',
+                  '장애 대응 기록에서 원인, 재발 방지, 후속 조치를 남기기 위한 스킬',
+                  '사내 API 문서를 새 팀원이 바로 따라 할 수 있게 안내하기 위한 스킬',
+                ].map((example) => (
+                  <button
+                    key={example}
+                    type="button"
+                    className="border-border text-muted-foreground hover:bg-accent/40 rounded-md border px-3 py-2 text-left text-xs leading-5"
+                    onClick={() => setAiGoal(example)}
+                  >
+                    {example}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {step === 'urlInput' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="어디서 가져올까요?"
+                description="공개된 문서, GitHub의 스킬 문서, 또는 설명 페이지 주소를 넣으세요."
+              />
+              <label className="space-y-2">
+                <span className="text-sm font-medium">URL</span>
+                <input
+                  value={url}
+                  onChange={(event) => setUrl(event.target.value)}
+                  className={`${agentTextInputClass} font-sans`}
+                  placeholder="https://..."
+                />
+              </label>
+              <p className="text-muted-foreground text-sm leading-6">
+                주소의 내용을 읽어 초안을 만들고, 다음 단계에서 이름과 작업 방식을 나눠 확인합니다.
+              </p>
+            </div>
+          ) : null}
+
+          {step === 'generating' ? (
+            <div className="flex min-h-[320px] flex-col items-center justify-center text-center">
+              <Loader2 className="text-primary mb-4 h-8 w-8 animate-spin" />
+              <div className="text-base font-semibold">
+                {source === 'url' ? 'URL을 읽고 있어요' : '초안을 만드는 중이에요'}
+              </div>
+              <p className="text-muted-foreground mt-2 max-w-sm text-sm leading-6">
+                내용을 정리하는 동안 다른 단계로 이동할 수 없습니다. 잠시만 기다려주세요.
+              </p>
+            </div>
+          ) : null}
+
+          {draft && step === 'basic' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="이름과 용도를 확인하세요"
+                description="스킬 목록에 보일 이름과 에이전트가 이 스킬을 고르는 기준입니다."
+              />
+              <label className="space-y-2">
+                <span className="text-sm font-medium">이름</span>
+                <input
+                  value={draft.displayName}
+                  onChange={(event) => setDraft({ ...draft, displayName: event.target.value })}
+                  className={`${agentTextInputClass} font-sans`}
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="text-sm font-medium">한 줄 설명</span>
+                <textarea
+                  value={draft.description}
+                  onChange={(event) => setDraft({ ...draft, description: event.target.value })}
+                  className={`${agentTextInputClass} min-h-24 resize-y font-sans leading-6`}
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="text-sm font-medium">사용하는 상황</span>
+                <textarea
+                  value={draft.useCases}
+                  onChange={(event) => setDraft({ ...draft, useCases: event.target.value })}
+                  className={`${agentTextInputClass} min-h-24 resize-y font-sans leading-6`}
+                  placeholder="예: 회의록, 음성 기록, 긴 논의 내용을 정리할 때"
+                />
+              </label>
+            </div>
+          ) : null}
+
+          {draft && step === 'workflow' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="작업 방식을 다듬으세요"
+                description="에이전트가 실제로 따라야 할 순서와 결과 기준입니다."
+              />
+              <label className="space-y-2">
+                <span className="text-sm font-medium">처리 순서</span>
+                <textarea
+                  value={draft.steps}
+                  onChange={(event) => setDraft({ ...draft, steps: event.target.value })}
+                  className={`${agentTextInputClass} min-h-40 resize-y font-sans leading-6`}
+                  placeholder={
+                    '1. 입력 내용을 확인한다\n2. 핵심 항목을 분류한다\n3. 결과를 정리한다'
+                  }
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="text-sm font-medium">결과 형식</span>
+                <textarea
+                  value={draft.outputFormat}
+                  onChange={(event) => setDraft({ ...draft, outputFormat: event.target.value })}
+                  className={`${agentTextInputClass} min-h-24 resize-y font-sans leading-6`}
+                  placeholder="예: 요약, 결정 사항, 담당자, 다음 할 일 순서로 답변"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="text-sm font-medium">주의할 점</span>
+                <textarea
+                  value={draft.cautions}
+                  onChange={(event) => setDraft({ ...draft, cautions: event.target.value })}
+                  className={`${agentTextInputClass} min-h-24 resize-y font-sans leading-6`}
+                  placeholder="예: 확인되지 않은 내용은 추측하지 않기"
+                />
+              </label>
+            </div>
+          ) : null}
+
+          {draft && step === 'references' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="참고 자료를 확인하세요"
+                description="에이전트가 필요할 때 함께 참고할 내용입니다. 없어도 저장할 수 있습니다."
+              />
+              <div className="space-y-3">
+                {draft.references.length === 0 ? (
+                  <div className="border-border text-muted-foreground rounded-md border px-3 py-6 text-sm">
+                    참고 자료가 없습니다.
+                  </div>
+                ) : (
+                  draft.references.map((reference, index) => (
+                    <div
+                      key={reference.id}
+                      className="border-border space-y-3 rounded-md border p-3"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-medium">참고 자료 {index + 1}</div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setDraft({
+                              ...draft,
+                              references: draft.references.filter(
+                                (item) => item.id !== reference.id,
+                              ),
+                            })
+                          }
+                        >
+                          삭제
+                        </Button>
+                      </div>
+                      <input
+                        value={reference.title}
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            references: updateReference(draft.references, reference.id, {
+                              title: event.target.value,
+                            }),
+                          })
+                        }
+                        className={`${agentTextInputClass} font-sans`}
+                        placeholder="참고 제목"
+                      />
+                      <textarea
+                        value={reference.content}
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            references: updateReference(draft.references, reference.id, {
+                              content: event.target.value,
+                            }),
+                          })
+                        }
+                        className={`${agentTextInputClass} min-h-32 resize-y font-sans leading-6`}
+                        placeholder="참고 내용"
+                      />
+                    </div>
+                  ))
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  setDraft({
+                    ...draft,
+                    references: [
+                      ...draft.references,
+                      { id: newReferenceId(), title: '', content: '' },
+                    ],
+                  })
+                }
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                참고 자료 추가
+              </Button>
+            </div>
+          ) : null}
+
+          {draft && step === 'review' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="저장하기 전에 확인하세요"
+                description="저장하면 현재 에이전트의 스킬 목록에 바로 추가됩니다."
+              />
+              <div className="border-border divide-border rounded-md border">
+                <SkillReviewRow label="이름" value={draft.displayName || '-'} />
+                <SkillReviewRow label="한 줄 설명" value={draft.description || '-'} />
+                <SkillReviewRow label="사용하는 상황" value={draft.useCases || '-'} />
+                <SkillReviewRow
+                  label="참고 자료"
+                  value={`${draft.references.filter((item) => item.title.trim() || item.content.trim()).length}개`}
+                />
+              </div>
+              <Button type="button" variant="outline" onClick={() => setStep('raw')}>
+                고급 원문 보기
+              </Button>
+            </div>
+          ) : null}
+
+          {draft && step === 'raw' ? (
+            <div className="space-y-4">
+              <SkillWizardHeading
+                title="고급 원문"
+                description="스킬이 저장될 원문입니다. 필요한 경우에만 수정하세요."
+              />
+              <textarea
+                value={draft.rawEdited ? draft.rawBody : buildSkillBody(draft)}
+                onChange={(event) =>
+                  setDraft({ ...draft, rawBody: event.target.value, rawEdited: true })
+                }
+                className={`${agentTextInputClass} min-h-[420px] resize-y font-mono text-xs leading-5`}
+                spellCheck={false}
+              />
+            </div>
+          ) : null}
+
+          {error ? <p className="text-destructive mt-4 text-sm">{error}</p> : null}
+        </div>
+
+        <div className="border-border flex items-center justify-between gap-2 border-t px-5 py-4">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              if (step === 'entry') {
+                closeDialog()
+                return
+              }
+              if (step === 'aiInput' || step === 'urlInput') {
+                setStep('entry')
+                setError(null)
+                return
+              }
+              if (step === 'generating') return
+              setStep(previousSkillStep(step, source))
+              setError(null)
+            }}
+            disabled={generating || saving}
+          >
+            {step === 'entry' ? '취소' : '이전'}
+          </Button>
+
+          {step === 'entry' ? null : step === 'aiInput' ? (
+            <Button type="button" onClick={() => void createDraftFromAi()} disabled={generating}>
+              초안 만들기
+            </Button>
+          ) : step === 'urlInput' ? (
+            <Button type="button" onClick={() => void createDraftFromUrl()} disabled={generating}>
+              가져오기
+            </Button>
+          ) : step === 'generating' ? (
+            <Button type="button" disabled>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              처리 중
+            </Button>
+          ) : step === 'review' ? (
+            <Button type="button" onClick={() => void handleSubmit()} disabled={!canSave}>
+              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              저장하고 사용하기
+            </Button>
+          ) : step === 'raw' ? (
+            <Button type="button" onClick={() => setStep('review')}>
+              확인
+            </Button>
+          ) : (
+            <Button type="button" onClick={() => setStep(nextSkillStep(step))}>
+              다음
+            </Button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SkillWizardHeading({ description, title }: { description: string; title: string }) {
+  return (
+    <div>
+      <h3 className="text-foreground text-lg font-semibold">{title}</h3>
+      <p className="text-muted-foreground mt-1 text-sm leading-6">{description}</p>
+    </div>
+  )
+}
+
+function SkillWizardSteps({ current }: { current: SkillWizardStep }) {
+  const steps: Array<{ id: SkillWizardStep; label: string }> = [
+    { id: 'basic', label: '이름과 용도' },
+    { id: 'workflow', label: '작업 방식' },
+    { id: 'references', label: '참고 자료' },
+    { id: 'review', label: '최종 확인' },
+  ]
+  const currentIndex = steps.findIndex((step) => step.id === current)
+  return (
+    <div className="mb-5 grid grid-cols-4 gap-2">
+      {steps.map((step, index) => (
+        <div
+          key={step.id}
+          className={`rounded-md border px-2 py-2 text-center text-xs ${
+            index === currentIndex
+              ? 'border-primary/40 bg-primary/10 text-foreground'
+              : index < currentIndex
+                ? 'border-border bg-muted/40 text-foreground'
+                : 'border-border text-muted-foreground'
+          }`}
+        >
+          {step.label}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SkillReviewRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-2 px-3 py-3 text-sm sm:grid-cols-[120px_minmax(0,1fr)]">
+      <div className="text-muted-foreground">{label}</div>
+      <div className="whitespace-pre-wrap">{value}</div>
+    </div>
+  )
+}
+
+function isDraftStep(step: SkillWizardStep) {
+  return (
+    step === 'basic' ||
+    step === 'workflow' ||
+    step === 'references' ||
+    step === 'review' ||
+    step === 'raw'
+  )
+}
+
+function nextSkillStep(step: SkillWizardStep): SkillWizardStep {
+  if (step === 'basic') return 'workflow'
+  if (step === 'workflow') return 'references'
+  if (step === 'references') return 'review'
+  return step
+}
+
+function previousSkillStep(step: SkillWizardStep, source: 'ai' | 'url' | null): SkillWizardStep {
+  if (step === 'basic') return source === 'url' ? 'urlInput' : 'aiInput'
+  if (step === 'workflow') return 'basic'
+  if (step === 'references') return 'workflow'
+  if (step === 'review') return 'references'
+  if (step === 'raw') return 'review'
+  return 'entry'
+}
+
+type SkillWizardStep =
+  | 'entry'
+  | 'aiInput'
+  | 'urlInput'
+  | 'generating'
+  | 'basic'
+  | 'workflow'
+  | 'references'
+  | 'review'
+  | 'raw'
+
+type SkillReferenceDraft = {
+  id: string
+  title: string
+  content: string
+}
+
+type SkillDraftForm = {
+  key: string
+  displayName: string
+  description: string
+  useCases: string
+  steps: string
+  outputFormat: string
+  cautions: string
+  references: SkillReferenceDraft[]
+  rawBody: string
+  rawEdited: boolean
+}
+
+function skillDraftToForm(draft: CustomSkillDraft): SkillDraftForm {
+  const body = draft.body || ''
+  return {
+    key: draft.name,
+    displayName: draft.displayName || draft.name,
+    description: draft.description || '',
+    useCases:
+      extractMarkdownSection(body, ['사용 기준', '사용하는 상황', 'When to use']) ||
+      draft.description ||
+      '',
+    steps:
+      extractMarkdownSection(body, ['작업 순서', '작업 방식', 'Workflow']) ||
+      stripSkillFrontmatter(body),
+    outputFormat: extractMarkdownSection(body, ['결과 형식', '결과물', 'Output']) || '',
+    cautions: extractMarkdownSection(body, ['주의할 점', '제한', '확인 기준']) || '',
+    references: (draft.documents ?? [])
+      .filter((document) => document.documentKey !== 'SKILL.md')
+      .map((document) => ({
+        id: newReferenceId(),
+        title: document.title || document.documentKey,
+        content: document.content || '',
+      })),
+    rawBody: body,
+    rawEdited: false,
+  }
+}
+
+function buildSkillBody(draft: SkillDraftForm) {
+  return `---
+name: ${normalizeCustomSkillName(draft.key || draft.displayName)}
+description: ${draft.description.trim()}
+---
+
+# ${draft.displayName.trim() || '사용자 스킬'}
+
+## 사용 기준
+
+${draft.useCases.trim() || '- 사용자의 요청이 이 스킬의 목적과 직접 맞을 때 사용한다.'}
+
+## 작업 순서
+
+${draft.steps.trim() || '1. 요청의 목표를 확인한다.\n2. 필요한 정보를 정리한다.\n3. 결과를 검토하기 쉽게 답한다.'}
+
+## 결과 형식
+
+${draft.outputFormat.trim() || '- 사용자가 바로 확인할 수 있게 간단히 정리한다.'}
+
+## 주의할 점
+
+${draft.cautions.trim() || '- 확인되지 않은 내용은 추측하지 않는다.'}
+`
+}
+
+function updateReference(
+  references: SkillReferenceDraft[],
+  id: string,
+  patch: Partial<SkillReferenceDraft>,
+) {
+  return references.map((reference) =>
+    reference.id === id ? { ...reference, ...patch } : reference,
+  )
+}
+
+function referenceDocumentKey(reference: SkillReferenceDraft, index: number) {
+  const slug = normalizeCustomSkillName(reference.title || `reference-${index + 1}`)
+  return `references/${slug || `reference-${index + 1}`}.md`
+}
+
+function newReferenceId() {
+  return `reference-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function extractMarkdownSection(markdown: string, headings: string[]) {
+  const normalized = stripSkillFrontmatter(markdown)
+  for (const heading of headings) {
+    const pattern = new RegExp(
+      `^##\\s+${escapeRegExp(heading)}\\s*$([\\s\\S]*?)(?=^##\\s+|$)`,
+      'im',
+    )
+    const match = normalized.match(pattern)
+    if (match?.[1]?.trim()) return match[1].trim()
+  }
+  return ''
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function stripSkillFrontmatter(markdown: string) {
+  const normalized = markdown.replace(/\r\n/g, '\n')
+  if (!normalized.startsWith('---\n')) return normalized.trim()
+  const closing = normalized.indexOf('\n---\n', 4)
+  if (closing < 0) return normalized.trim()
+  return normalized.slice(closing + 5).trim()
+}
 export function AgentAdapterTypeDropdown({
   options,
   value,
@@ -1739,6 +2461,16 @@ function insertSkillKey(keys: string[], key: string, insertIndex: number) {
 
 function normalizeSkillSearch(value: string) {
   return value.trim().toLowerCase()
+}
+
+function normalizeCustomSkillName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, '-')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
 }
 
 function filterSkillRows(rows: AgentSkillRowData[], normalizedSearch: string) {

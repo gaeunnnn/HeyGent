@@ -156,6 +156,7 @@ async def lifespan(app: FastAPI):
     skill_registry.register_many(builtin_skills)
     skill_repository = PostgresSkillRepository(postgres_connection_factory)
     skill_repository.sync_builtin_catalog(builtin_skills)
+    skill_registry.register_many(skill_repository.list_runtime_custom_skills())
     skill_prompt_builder = SkillPromptBuilder(skill_registry)
     prompt_builder = PromptBuilder(skill_prompt_builder)
     bridge_session_manager = BridgeSessionManager()

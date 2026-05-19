@@ -29,6 +29,11 @@ class DummySkillRegistry:
                 "description": "`design.list_presets`, `design.read_preset`, `prototype.create_artifact` runtime tool 로 DESIGN.md 기반 React 프로토타입을 만든다.",
                 "body": "# Awesome DESIGN.md",
             },
+            "health-condition-check": {
+                "name": "health-condition-check",
+                "metadata": {"runtime": {"requires_toolsets": ["health"]}},
+                "body": "`health.execute` runtime tool 로 사용자 건강 데이터 프록시 명령을 실행한다.",
+            },
         }
 
 
@@ -98,6 +103,19 @@ def test_capability_resolver_adds_design_toolset_from_skill_description():
     assert capabilities.enabled_toolsets == ("skills", "design", "prototype", "tool-result")
     assert "design.read_preset" in capabilities.enabled_tool_names
     assert "prototype.create_artifact" in capabilities.enabled_tool_names
+
+
+def test_capability_resolver_adds_health_toolset_from_health_skill_metadata():
+    capabilities = resolve_task_capabilities(
+        {
+            "enabled_toolsets": ["skills"],
+            "enabledSkillNames": ["health-condition-check"],
+        },
+        skill_registry=DummySkillRegistry(),
+    )
+
+    assert capabilities.enabled_toolsets == ("skills", "health", "tool-result")
+    assert "health.execute" in capabilities.enabled_tool_names
 
 
 def test_capability_resolver_opens_skill_toolsets_without_requested_toolsets():

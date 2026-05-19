@@ -42,7 +42,12 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tabs } from '@/components/ui/tabs'
 import { getCommandUsage, type CommandUsageRecord } from '@/apis/aiCommandUsage'
-import { getUserSkillDetail, type SkillCatalogDetail, type SkillCatalogItem } from '@/apis/agents'
+import {
+  deleteCustomSkill,
+  getUserSkillDetail,
+  type SkillCatalogDetail,
+  type SkillCatalogItem,
+} from '@/apis/agents'
 import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import { listTaskRuns } from '@/apis/taskRuns'
 import {
@@ -327,6 +332,18 @@ export function SubAgentDetailView({
       .finally(() => setSkillDetailLoading(false))
   }
 
+  const handleSkillDeleted = async (detail: SkillCatalogDetail) => {
+    await deleteCustomSkill(detail.skillId)
+    setSkillCatalog((current) => current.filter((skill) => skill.skillId !== detail.skillId))
+    setSkillDraftState({
+      itemId: item.id,
+      skills: skillDraft.filter((skillId) => skillId !== detail.skillId),
+    })
+    setSkillDetail(null)
+    useAgentCacheStore.getState().invalidateUserSkills()
+    setSaved(false)
+  }
+
   const handleDelete = async () => {
     setDeleting(true)
     setDeleteError(null)
@@ -510,6 +527,19 @@ export function SubAgentDetailView({
             missingSkills={missingSkillIds}
             selectedCount={selectedKnownSkillIds.length}
             saving={skillSaving}
+            onSkillCreated={(skill) => {
+              setSkillCatalog((current) =>
+                current.some((item) => item.skillId === skill.skillId)
+                  ? current
+                  : [...current, skill],
+              )
+              setSkillDraftState({
+                itemId: item.id,
+                skills: Array.from(new Set([...skillDraft, skill.skillId])),
+              })
+              useAgentCacheStore.getState().invalidateUserSkills()
+              setSaved(false)
+            }}
             onSkillReorder={(orderedSkillIds) => {
               setSkillDraftState({
                 itemId: item.id,
@@ -609,6 +639,7 @@ export function SubAgentDetailView({
         detail={skillDetail}
         loading={skillDetailLoading}
         open={skillDetailOpen}
+        onDelete={handleSkillDeleted}
         onOpenChange={setSkillDetailOpen}
       />
     </div>

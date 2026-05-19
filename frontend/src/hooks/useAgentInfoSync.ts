@@ -249,22 +249,29 @@ export function useAgentInfoSync(
 
   // profileIdMap이 늦게 채워지거나 agentPanels(이름·역할 등)가 바뀌면 agentInfoMap을 갱신한다.
   // agentPanels의 최신 값을 캐시 데이터보다 우선 적용해 사이드바 수정이 즉시 반영되도록 한다.
+  // 신규 추가 에이전트(API 캐시 미적재)는 agentPanels 데이터로 즉시 반영한다.
   useEffect(() => {
     if (!profileIdMap) return
     for (const [profileId, spriteId] of Object.entries(profileIdMap)) {
       const cachedData = cachedProfilesRef.current.get(profileId)
-      if (!cachedData) continue
       const panel = agentPanels?.find((p) => p.agent.profileId === profileId)
-      const profileData: typeof cachedData = panel
+      if (!cachedData && !panel) continue
+      const baseData: CachedSubAgentProfile = cachedData ?? {
+        name: panel!.agent.name,
+        role: panel!.agent.role ?? '',
+        skills: panel!.agent.skills ?? [],
+        ...(panel!.agent.profileImage ? { profileImage: panel!.agent.profileImage } : {}),
+      }
+      const profileData: CachedSubAgentProfile = panel
         ? {
-            ...cachedData,
+            ...baseData,
             name: panel.agent.name,
-            role: panel.agent.role ?? cachedData.role,
+            role: panel.agent.role ?? baseData.role,
             ...(panel.agent.profileImage !== undefined
               ? { profileImage: panel.agent.profileImage ?? undefined }
               : {}),
           }
-        : cachedData
+        : baseData
       updateAgentInfo(spriteId, profileData)
     }
   }, [profileIdMap, updateAgentInfo, agentPanels])

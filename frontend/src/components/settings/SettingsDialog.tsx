@@ -505,13 +505,13 @@ function SkillsContent() {
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
         <DialogContent className="max-h-[82vh] max-w-4xl overflow-hidden p-0">
-          <DialogHeader className="border-border border-b px-5 py-4">
+          <DialogHeader className="border-border selectable-text border-b px-5 py-4">
             <DialogTitle>{detail?.displayName ?? '스킬 상세'}</DialogTitle>
             <DialogDescription>
               {detail?.description ?? '스킬 정보를 확인합니다.'}
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-[68vh] overflow-y-auto px-5 py-4">
+          <div className="selectable-text max-h-[68vh] overflow-y-auto px-5 py-4">
             {detailLoading ? (
               <div className="text-muted-foreground flex items-center gap-2 py-10 text-sm">
                 <Loader2 className="h-4 w-4 animate-spin" />

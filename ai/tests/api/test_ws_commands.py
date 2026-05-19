@@ -684,6 +684,58 @@ def test_ws_task_runs_active_list_filters_authenticated_owner(client):
     assert [item["task_run_id"] for item in response["payload"]["task_runs"]] == ["task_active_ws_owner"]
 
 
+def test_ws_task_runs_active_list_pushes_authenticated_owner_filter_to_repository(client):
+    client.app.state.backend_auth_client = FakeBackendAuthClient(user_id="active-owner")
+    client.app.state.repository.create_task(
+        TaskRun(
+            task_run_id="task_active_ws_owner_filter",
+            task_type="agent.loop",
+            owner_key="active-owner",
+            session_key="session_active_ws_owner_filter",
+            status="RUNNING",
+            title="active command",
+        )
+    )
+
+    class _OwnerRecordingRepository:
+        def __init__(self, inner):
+            self.inner = inner
+            self.list_owner_keys: list[str | None] = []
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def list_tasks_by_statuses(self, statuses, *, session_key=None, owner_key=None, limit=50, offset=0):
+            self.list_owner_keys.append(owner_key)
+            return self.inner.list_tasks_by_statuses(
+                statuses,
+                session_key=session_key,
+                owner_key=owner_key,
+                limit=limit,
+                offset=offset,
+            )
+
+    recording_repository = _OwnerRecordingRepository(client.app.state.repository)
+    client.app.state.repository = recording_repository
+
+    with client.websocket_connect("/ai/api/v1/realtime/user/ws") as websocket:
+        websocket.send_json({"type": "auth.start", "accessToken": "token-secret"})
+        websocket.receive_json()
+        websocket.send_json(
+            {
+                "protocolVersion": 1,
+                "type": "taskRuns.active.list",
+                "requestId": "req_active_owner_filter",
+                "payload": {"sessionId": "session_active_ws_owner_filter"},
+            }
+        )
+
+        response = websocket.receive_json()
+
+    assert response["type"] == "taskRuns.active.list.result"
+    assert recording_repository.list_owner_keys == ["active-owner"]
+
+
 def test_ws_task_run_snapshot_and_replay_include_activity_transcript(client):
     client.app.state.backend_auth_client = FakeBackendAuthClient(user_id="activity-owner")
     client.app.state.repository.create_task(

@@ -10,6 +10,9 @@ class _Cursor:
     def fetchall(self):
         return list(self._rows)
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
 
 class _Connection:
     def __init__(self) -> None:
@@ -27,6 +30,41 @@ class _Connection:
             return _Cursor(self.enabled_rows)
         if "FROM ai_agent_skill_settings s JOIN ai_skill_catalog c" in normalized:
             return _Cursor(self.agent_rows_by_profile.get(params[0], []))
+        return _Cursor([])
+
+
+class _CustomSkillConnection:
+    def __init__(self) -> None:
+        self.row = {
+            "skill_id": "custom:owner-1:meeting-notes",
+            "name": "meeting-notes",
+            "display_name": "회의록 정리",
+            "description": "회의 내용을 요약합니다.",
+            "source_type": "custom",
+            "source_path": "custom://custom:owner-1:meeting-notes/SKILL.md",
+            "version": 1,
+            "default_enabled": True,
+            "enabled": True,
+            "metadata": {
+                "ownerKey": "owner-1",
+                "body": "---\nname: meeting-notes\ndescription: 회의 내용을 요약합니다.\n---\n\n# 회의록",
+                "documents": [
+                    {
+                        "documentKey": "references/style.md",
+                        "title": "스타일",
+                        "content": "# Style",
+                    }
+                ],
+            },
+            "config_snapshot": {},
+        }
+
+    def execute(self, sql: str, params: tuple | None = None):
+        normalized = " ".join(sql.split())
+        if "WHERE source_type = 'custom'" in normalized:
+            return _Cursor([self.row])
+        if "WHERE c.skill_id = %s" in normalized:
+            return _Cursor([self.row])
         return _Cursor([])
 
 
@@ -107,3 +145,48 @@ def test_read_skill_documents_returns_user_facing_titles(tmp_path):
     assert documents[0]["title"] == "기본 지침"
     assert documents[1]["title"] == "블록 구성 가이드"
     assert documents[1]["content"] == "# Block Types"
+
+
+def test_get_user_skill_detail_returns_custom_metadata_documents():
+    connection = _CustomSkillConnection()
+    repository = PostgresSkillRepository(lambda: connection)
+
+    detail = repository.get_user_skill_detail(
+        owner_key="owner-1",
+        skill_id="custom:owner-1:meeting-notes",
+    )
+
+    assert detail is not None
+    assert detail["body"].startswith("---\nname: meeting-notes")
+    assert detail["files"] == ["SKILL.md", "references/style.md"]
+    assert [document["document_key"] for document in detail["documents"]] == [
+        "SKILL.md",
+        "references/style.md",
+    ]
+    assert detail["documents"][0]["content"] == "# 회의록"
+
+
+def test_list_runtime_custom_skills_uses_inline_body_and_documents():
+    connection = _CustomSkillConnection()
+    repository = PostgresSkillRepository(lambda: connection)
+
+    skills = repository.list_runtime_custom_skills()
+
+    assert skills == [
+        {
+            "name": "meeting-notes",
+            "description": "회의 내용을 요약합니다.",
+            "path": "custom://custom:owner-1:meeting-notes/SKILL.md",
+            "body": "---\nname: meeting-notes\ndescription: 회의 내용을 요약합니다.\n---\n\n# 회의록",
+            "metadata": {
+                "ownerKey": "owner-1",
+                "documents": [
+                    {
+                        "documentKey": "references/style.md",
+                        "title": "스타일",
+                        "content": "# Style",
+                    }
+                ],
+            },
+        }
+    ]
