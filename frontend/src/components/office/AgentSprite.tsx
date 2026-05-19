@@ -1,4 +1,4 @@
-import { useState, useLayoutEffect, useRef, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import type { AgentRuntime } from './types'
 import type { AgentVisualizationInfo } from './types'
 
@@ -39,8 +39,7 @@ const SITTING_SPRITES: Record<string, string> = {
 
 const WALK_FRAMES = ['walk_side_01', 'walk_side_stand', 'walk_side_02', 'walk_side_stand'] as const
 
-function getSpriteSrc(agent: AgentRuntime, standingUp: boolean): string {
-  if (standingUp) return `${agent.config.spritePath}/idle_front.png`
+function getSpriteSrc(agent: AgentRuntime): string {
   const base = agent.config.spritePath
   const sittingMap = agent.config.sittingSprites
     ? { ...SITTING_SPRITES, ...agent.config.sittingSprites }
@@ -72,28 +71,6 @@ export function AgentSprite({
     injectSpawnStyles()
   }, [])
 
-  // sitting_desk → walking 전환 시 idle_front를 브라우저 첫 페인트 전에 삽입
-  // useLayoutEffect로 동기 처리 — walk 스프라이트가 한 프레임도 노출되지 않도록 한다.
-  const [standingUp, setStandingUp] = useState(false)
-  const prevStateRef = useRef(agent.state)
-  const standingUpTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-
-  useLayoutEffect(() => {
-    const prevState = prevStateRef.current
-    prevStateRef.current = agent.state
-
-    if (agent.state === 'walking' && prevState === 'sitting_desk') {
-      setStandingUp(true)
-      clearTimeout(standingUpTimerRef.current)
-      standingUpTimerRef.current = setTimeout(() => setStandingUp(false), 150)
-    } else if (agent.state !== 'walking') {
-      clearTimeout(standingUpTimerRef.current)
-      standingUpTimerRef.current = setTimeout(() => setStandingUp(false), 0)
-    }
-
-    return () => clearTimeout(standingUpTimerRef.current)
-  }, [agent.state])
-
   const { config, position, state, transitionDuration } = agent
   const scale = (config.scale ?? 1) * (config.stateScales?.[state] ?? 1)
   const size = (state === 'sitting_desk' ? SIZE_SITTING : SIZE_NORMAL) * scale
@@ -105,10 +82,7 @@ export function AgentSprite({
   const [bubbleHovered, setBubbleHovered] = useState(false)
 
   const showBubble =
-    !isSpawning &&
-    hoverInfo?.activityStatus === 'working' &&
-    !!hoverInfo.currentTask &&
-    hoverInfo.currentTask.status === 'in_progress'
+    !isSpawning && hoverInfo?.activityStatus === 'working' && !!hoverInfo.currentTask
 
   const imgTransform =
     agent.facingRight && (state === 'walking' || state === 'standing_wait')
@@ -130,6 +104,7 @@ export function AgentSprite({
         cursor: isInteractive ? 'pointer' : 'default',
       }}
       onTransitionEnd={(e) => {
+        if (e.target !== e.currentTarget) return
         if (state === 'walking' && e.propertyName === 'transform') onArrived(config.id)
       }}
       onClick={(e) => {
@@ -246,7 +221,7 @@ export function AgentSprite({
       )}
 
       <img
-        src={getSpriteSrc(agent, standingUp)}
+        src={getSpriteSrc(agent)}
         alt={config.name}
         draggable={false}
         style={{

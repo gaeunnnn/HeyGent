@@ -615,7 +615,7 @@ function buildRestingSubAgentRuntime(
   }
 }
 
-function playAgentChime() {
+export function playAgentChime() {
   try {
     const ctx = new AudioContext()
     const play = () => {
@@ -709,9 +709,6 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
 
       const workPosition = CEO_CONFIG.destinations.work!
       const existingCeo = state.agentRuntimes.find((agent) => agent.config.id === 'ceo')
-      if (existingCeo?.state !== 'sitting_work') {
-        playAgentChime()
-      }
       const nextCeo: AgentRuntime = {
         ...(existingCeo ?? {
           config: CEO_CONFIG,
@@ -770,10 +767,6 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
       const baseSpawnedKeys = shouldResetSession ? [] : state.spawnedKeys
       const existingCeo = baseAgents.find((agent) => agent.config.id === 'ceo')
       const workPosition = CEO_CONFIG.destinations.work!
-
-      if (existingCeo?.state !== 'sitting_work') {
-        playAgentChime()
-      }
 
       const nextCeo: AgentRuntime = {
         ...(existingCeo ?? {
@@ -842,19 +835,6 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
 
   settleCeoAtDesk: (taskRunId) =>
     set((state) => {
-      const ceo = state.agentRuntimes.find((agent) => agent.config.id === 'ceo')
-      const deskPosition = ceo?.config.destinations.desk
-      const alreadyAtDesk =
-        ceo !== undefined &&
-        deskPosition !== undefined &&
-        ceo.state === 'sitting_desk' &&
-        Math.abs(ceo.position.x - deskPosition.x) < 1 &&
-        Math.abs(ceo.position.y - deskPosition.y) < 1
-
-      if (ceo !== undefined && !alreadyAtDesk) {
-        playAgentChime()
-      }
-
       return {
         activeCeoTaskRunId:
           taskRunId !== undefined &&
