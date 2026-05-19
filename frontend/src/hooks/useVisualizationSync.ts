@@ -74,16 +74,20 @@ function resolveDestination(
   // taskRun.status 를 기준으로 즉시 결정한다 — task 가 끝났는데 가장 마지막 step event 가
   // step.started 같은 거여서 'desk' 가 잘못 발사되어 캐릭터가 책상에 박히는 사고를 막는다.
   const taskStatus = taskRun.status?.toUpperCase()
-  if (taskStatus === 'COMPLETED' || taskStatus === 'CANCELED' || taskStatus === 'CANCELLED') {
+  // 작업이 끝났으면 (성공·실패·취소 무관) 무조건 휴식. 실패해도 엘리베이터 앞 calling 자세로
+  // 박혀 있는 게 아니라 소파/플로어로 보낸다.
+  if (
+    taskStatus === 'COMPLETED' ||
+    taskStatus === 'CANCELED' ||
+    taskStatus === 'CANCELLED' ||
+    taskStatus === 'FAILED'
+  ) {
     return 'rest'
-  }
-  if (taskStatus === 'FAILED') {
-    return 'calling'
   }
 
   if (latestEvent !== undefined) {
     if (TASK_COMPLETED_EVENT_TYPES.has(latestEvent.event_type)) return 'rest'
-    if (TASK_FAILED_EVENT_TYPES.has(latestEvent.event_type)) return 'calling'
+    if (TASK_FAILED_EVENT_TYPES.has(latestEvent.event_type)) return 'rest'
     if (TASK_CANCELED_EVENT_TYPES.has(latestEvent.event_type)) return 'rest'
     // step 단위 종료 이벤트는 task 전체 완료가 아님 — taskRun.status가 RUNNING이면 desk 유지
     if (STEP_TERMINAL_EVENT_TYPES.has(latestEvent.event_type)) {
@@ -102,8 +106,14 @@ function resolveDestination(
   const status = (eventStatus ?? taskRun.status)?.toUpperCase()
 
   if (!status || status === 'PENDING') return null
-  if (status === 'FAILED') return 'calling'
-  if (status === 'COMPLETED' || status === 'CANCELED' || status === 'CANCELLED') return 'rest'
+  if (
+    status === 'FAILED' ||
+    status === 'COMPLETED' ||
+    status === 'CANCELED' ||
+    status === 'CANCELLED'
+  ) {
+    return 'rest'
+  }
   if (status === 'RUNNING' || status === 'WAITING' || status === 'BLOCKED') return 'desk'
 
   // status 필드 없을 때 event_type으로 보조 판단
@@ -147,6 +157,18 @@ export function useVisualizationSync(
       .join(','),
   )
   const lastDestByAgentId = useRef<Record<string, UIDestination>>({})
+  // 'rest' 전환 디바운스 timer. 에이전트 loop 가 짧은 task 를 연속 만들 때
+  // desk → rest → desk → rest 가 빠르게 반복되는 걸 막는다.
+  // task 완료 후 N 초간 새 task 가 안 오면 그제야 rest 발사.
+  const restDebounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(restDebounceTimers.current)) {
+        clearTimeout(timer)
+      }
+      restDebounceTimers.current = {}
+    }
+  }, [])
 
   useEffect(() => {
     const pendingMoves: Record<string, { destination: UIDestination; sortTime: number }> = {}
@@ -204,8 +226,31 @@ export function useVisualizationSync(
             continue
           }
         }
-        lastDestByAgentId.current[profileKey] = destination
-        handleMoveRef.current(profileKey, destination)
+        // desk/work/meeting/calling 같이 작업 가는 destination 은 즉시 발사 + rest 디바운스 취소.
+        if (destination !== 'rest') {
+          const existing = restDebounceTimers.current[profileKey]
+          if (existing !== undefined) {
+            clearTimeout(existing)
+            delete restDebounceTimers.current[profileKey]
+          }
+          lastDestByAgentId.current[profileKey] = destination
+          handleMoveRef.current(profileKey, destination)
+          continue
+        }
+        // rest 전환은 3 초 디바운스. 같은 task 의 step 들 사이 또는 새 task 가 곧 올 가능성이
+        // 있으므로 잠시 기다린다. 그 사이 desk 신호 오면 위 분기에서 timer 취소.
+        const prevTimer = restDebounceTimers.current[profileKey]
+        if (prevTimer !== undefined) clearTimeout(prevTimer)
+        const keyAtFire = profileKey
+        restDebounceTimers.current[profileKey] = setTimeout(() => {
+          delete restDebounceTimers.current[keyAtFire]
+          if (lastDestByAgentId.current[keyAtFire] === 'rest') {
+            // 이미 rest 였으면 다시 발사 안 함 (stuck 가드는 fallback 에서 처리).
+            return
+          }
+          lastDestByAgentId.current[keyAtFire] = 'rest'
+          handleMoveRef.current(keyAtFire, 'rest')
+        }, 3000)
       }
     }
 
