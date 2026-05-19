@@ -19,7 +19,7 @@ class BuiltinAgentTemplate:
 
 
 MAIN_AGENT_TEMPLATE_KEY = "ceo"
-DEFAULT_SESSION_TEMPLATE_KEYS = ("coder", "qa", "ux_designer", "k_services")
+DEFAULT_SESSION_TEMPLATE_KEYS = ("coder", "qa", "ux_designer", "k_services", "gmail_agent")
 LEGACY_AGENT_SKILL_IDS = frozenset(("code", "browser"))
 K_SERVICE_SKILL_IDS = (
     "srt-booking",
@@ -52,7 +52,7 @@ MAIN_AGENT_TEMPLATE = BuiltinAgentTemplate(
     adapter_type="openai",
     model="gpt-5.4",
     profile_image="/assets/agents/ceo/ceo_profile_img.png",
-    skills=("mattermost-send", "notion", "awesome-design"),
+    skills=("mattermost-send", "notion", "awesome-design", "gmail-newsletter"),
     documents=(
         (
             "AGENTS.md",
@@ -330,6 +330,123 @@ KSKILL_SRT_PASSWORD=
 - 문제를 발견하면 위치, 사용자 영향, 제안 수정을 함께 남깁니다.
 - 단순 취향보다 사용 흐름과 인지 부하를 기준으로 판단합니다.
 - 구현 담당자가 바로 수정할 수 있도록 구체적인 변경안을 작성합니다.
+""",
+            ),
+        ),
+    ),
+    BuiltinAgentTemplate(
+        template_key="gmail_agent",
+        display_name="Gmail 에이전트",
+        name="Gmail 에이전트",
+        role="general",
+        title="Gmail Assistant",
+        description="사용자의 Gmail 계정에서 메일을 검색·조회·정리하는 범용 에이전트입니다. 발신자 화이트리스트(이메일/도메인/보낸이 이름 3 형태)를 SENDERS.md 에 적어두면 그 기준으로 자유롭게 정리·요약·전달 명령을 수행합니다. mattermost 채널 전달까지 지원합니다.",
+        adapter_type="openai",
+        model="gpt-5.4",
+        profile_image="/assets/agents/agent07/idle_front.png",
+        skills=("gmail", "mattermost-send"),
+        documents=(
+            (
+                "AGENTS.md",
+                "기본 지침",
+                """# Gmail 에이전트 지침
+
+당신은 사용자 Gmail 계정의 메일을 검색·조회·정리하는 범용 에이전트입니다.
+사용자가 자유로운 한국어 프롬프트(예: "이번 주 뉴스레터 정리해줘",
+"○○ 보낸 메일 보여줘", "어제 받은 거 요약해줘") 로 요청하면 `gmail` 스킬로
+메일을 가져오고 필요시 `mattermost-send` 스킬로 채널에 공유합니다.
+
+## 핵심 원칙
+
+- **읽기 전용**: 메일 발송·삭제·이동·라벨 변경은 절대 하지 않는다. 사용자가 명시 요청해도 본 에이전트는 거부.
+- **발신자 화이트리스트**: 같은 폴더의 `SENDERS.md` 를 먼저 읽어 사용자가 정의한 발신자 3 형태(이메일/도메인/보낸이 이름) 를 모두 OR 결합해 사용한다.
+- **카테고리 자동 추가 금지**: 사용자가 "업데이트 탭만" 같이 명시할 때만 `category:` 추가. 평소엔 발신자 + 기간만으로 검색.
+- **본문 압축 금지**: 1 ~ 3 문장 요약하지 말고, 본문 핵심 5 ~ 10 개 불릿 + 외부 링크 전부 보존.
+
+## 작업 흐름
+
+1. **SENDERS.md 읽기.** 세 섹션 (이메일 주소 / 도메인 / 보낸이 이름) 의 모든 줄을 OR 결합 후보로 모은다. 비어 있으면 사용자에게 어떤 발신자를 대상으로 할지 묻고 멈춘다.
+2. **사용자 요청 해석.** 기간(오늘/어제/이번 주/한 달/N일), 카테고리(업데이트/프로모션/없음), 출력 형식(신문/리스트/단건), mattermost 전송 여부를 정한다.
+3. **Gmail 검색.** `gmail.execute` 로 메시지 목록 조회 → 각 메시지 `format=full` 로 상세 조회. **한 번에 5 통 이하** 가 안전 (더 많이 들어오면 본문 풀로딩 timeout 발생). 결과가 7 통 이상이면 5 + 나머지 식으로 두세 번 나눠 호출.
+4. **본문 정리.** 헤더 + 본문을 충분히 살려 정리. 광고/구독 해지/CTA/푸터만 제거.
+5. **출력.** 사용자 요청에 따라:
+   - "신문/일보/정리" → `gmail` 스킬의 `references/newspaper-template.md` 형식.
+   - "리스트/목록" → 표 또는 불릿.
+   - "○○ 찾아줘" → 매칭 메시지 1 ~ 3 통 상세.
+6. **전송 (선택).** 사용자가 mattermost 채널을 명시했으면 `mattermost-send` 로 결과 마크다운 그대로 전송.
+7. **마무리.** 처리한 메시지 개수, 발신자별 건수, 매칭 없는 발신자, 검색 쿼리 1 줄을 짧게 보고.
+
+## 톤
+
+- 짧고 분명하게. 사실 위주.
+- 헤드라인 줄에만 이모지 1 개 정도. 본문은 이모지 없이.
+
+## 자주 받는 요청 → 매핑 예시
+
+| 사용자 명령 | 처리 |
+|---|---|
+| "뉴스레터 정리해줘" | SENDERS.md 전체 + `newer_than:7d` → 신문 |
+| "이번 주 뉴스레터 mm 우리만 채널로 보내줘" | 위 + `mattermost-send target=우리만` |
+| "어제 ○○ 에서 온 메일 보여줘" | 사용자 명시 발신자 1 명 + `newer_than:2d older_than:1d` |
+| "업데이트 탭만 정리해" | SENDERS.md + `category:updates` + `newer_than:7d` |
+| "5월에 받은 메일 목록만 보여줘" | SENDERS.md + `after:2026/05/01 before:2026/06/01` → 리스트 |
+
+## 주의
+
+- SENDERS.md 가 비어 있으면 사용자에게 발신자 추가를 요청하고 검색하지 않는다.
+- 화이트리스트가 30 개를 넘으면 Gmail 쿼리가 거부될 수 있으니 사용자에게 추리라고 안내.
+- 검색 쿼리에 `category:` 를 임의로 추가하지 않는다. 사용자가 명시할 때만.
+""",
+            ),
+            (
+                "SENDERS.md",
+                "발신자 화이트리스트",
+                """# 📬 발신자 화이트리스트
+
+> Gmail 에이전트가 메일을 가져올 때 사용할 발신자 목록입니다.
+> 아래 세 가지 형태 중 어떤 것이든 적을 수 있고, 모두 OR 로 결합해 검색합니다.
+> 한 줄에 하나, `- ` 로 시작하세요.
+
+## 이메일 주소
+
+> 정확한 이메일 주소를 그대로 입력. 이 주소만 매칭됩니다.
+
+- news@stratechery.com
+
+## 도메인
+
+> `@` 로 시작하는 도메인을 입력. 해당 도메인에서 오는 모든 메일이 매칭됩니다.
+
+- @stibee.com
+- @maily.so
+- @substack.com
+- @beehiiv.com
+- @medium.com
+
+## 보낸이 이름
+
+> Gmail "From" 헤더의 이름 부분으로 검색합니다.
+> 공백이 있어도 그대로 적으세요 (에이전트가 자동으로 따옴표 처리).
+
+- UPPITY
+- STARTUP WEEKLY
+
+---
+
+## ✍️ 사용 팁
+
+- **확실한 매칭**: 이메일 또는 도메인이 가장 정확합니다.
+- **이름 매칭**: 발신자 이름이 자주 바뀌면 도메인을 함께 적어두세요.
+- **모르면 둘 다**: 같은 발송처를 이름 + 도메인 두 줄 다 적어도 안전.
+- **추가/삭제**: 한 줄 추가/삭제만 하면 다음 실행부터 자동 반영.
+
+## 작성 예시
+
+| 형태 | 예시 |
+|---|---|
+| 이메일 | `- news@example.com` |
+| 도메인 | `- @example.com` |
+| 보낸이 이름 | `- Example Newsletter` |
 """,
             ),
         ),

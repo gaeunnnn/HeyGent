@@ -1250,9 +1250,10 @@ class TaskEngine:
         if not work.parent_id:
             return None
         child_status = str(work.status or "").strip()
-        if child_status == "blocked":
-            parent_status = "blocked"
-        elif child_status == "done":
+        # 한 자식이 blocked 됐다고 부모를 같이 blocked 로 잠그면, A → (B, C) 같은 DAG 에서
+        # B 실패가 C 실행까지 차단해 버린다. 부모 status 는 모든 sibling 의 종합 결과로만
+        # 결정되어야 하므로 child blocked 는 in_review 로 올려 다른 형제 작업이 계속 흐르게 한다.
+        if child_status == "done":
             parent_status = "done"
         else:
             parent_status = "in_review"
