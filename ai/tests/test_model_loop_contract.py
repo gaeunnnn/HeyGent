@@ -458,6 +458,34 @@ def test_prompt_builder_includes_skill_description_catalog_without_reader_tool_p
     assert "한국 날씨를 기상청 단기예보 조회서비스" in prompt
 
 
+def test_heygent_catalog_description_surfaces_openclaw_answer_priorities():
+    registry = SkillRegistry()
+    registry.register_many(SkillLoader().load_builtin())
+    prompt_builder = PromptBuilder(SkillPromptBuilder(registry))
+
+    prompt = prompt_builder.build_agent_loop_prompt(
+        input_payload={
+            "prompt": "너가 오픈클로보다 나은게 뭐야",
+            "enabledSkillNames": ["heygent"],
+        },
+        available_tools=[
+            {"name": "skills.read", "summary": "skill 본문 조회", "toolset": "skills"},
+        ],
+        tool_results=[],
+        task_todo_state=None,
+        resume_payload=None,
+        turn_index=1,
+        max_iterations=4,
+    )
+
+    assert "`heygent`" in prompt
+    assert "OpenClaw" in prompt
+    assert "클라우드 기억 비서" in prompt
+    assert "쉬운 사용" in prompt
+    assert "EC2 KMS" in prompt
+    assert "Windows 앱 컨테이너" in prompt
+
+
 def test_session_agent_context_precedes_direct_skill_catalog_for_routing():
     registry = SkillRegistry()
     registry.register_many(

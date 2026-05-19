@@ -13,6 +13,7 @@ import { useSessionStore } from '@/store/useSessionStore'
 import { useUIStore } from '@/store/useUIStore'
 import { agentProfilesToPanelItems } from '@/apis/agents'
 import { useAgentCacheStore } from '@/store/useAgentCacheStore'
+import { useBuildingMappingStore } from '@/store/useBuildingMappingStore'
 import { pickTopSession } from '@/components/layout/sessionListUtils'
 
 export function SessionWorkspaceSidebar() {
@@ -84,6 +85,19 @@ export function SessionWorkspaceSidebar() {
   }
 
   const handleDeleteSession = async () => {
+    // 세션이 건물 어느 층에 매핑돼 있으면 좀비 카드가 남지 않도록 함께 정리한다.
+    // 세션 자체는 soft delete(deleted_at 박음) 이지만 매핑은 backend(Spring) DB 라
+    // 자동 cascade 가 안 걸려서 사용자 화면엔 사라진 세션의 카드가 그대로 남는다.
+    const mappingsByFloor = useBuildingMappingStore.getState().mappingsByFloor
+    const clearFloor = useBuildingMappingStore.getState().clearFloor
+    for (const [floorStr, mappedSessionId] of Object.entries(mappingsByFloor)) {
+      if (mappedSessionId === sessionId) {
+        const floor = Number(floorStr)
+        if (Number.isFinite(floor)) {
+          void clearFloor(floor).catch(() => undefined)
+        }
+      }
+    }
     await deleteSession(sessionId)
     const nextSession = pickTopSession(sessionsById, pinnedSessionIds, sessionId ?? undefined)
     if (nextSession !== null) {

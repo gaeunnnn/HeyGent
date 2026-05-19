@@ -714,6 +714,80 @@ class InMemorySkillRepository:
         item = self.get_user_skill(owner_key=owner_key, skill_id=skill_id)
         return dict(item) if item is not None else None
 
+    def create_custom_skill(
+        self,
+        *,
+        owner_key: str,
+        owner_user_id: int | None,
+        name: str,
+        display_name: str,
+        description: str,
+        body: str,
+        documents: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        skill_id = f"custom:{owner_key}:{name}"
+        self.catalog[skill_id] = {
+            "skill_id": skill_id,
+            "name": name,
+            "display_name": display_name,
+            "description": description,
+            "source_type": "custom",
+            "source_path": f"custom://{skill_id}/SKILL.md",
+            "version": 1,
+            "default_enabled": True,
+            "enabled": True,
+            "metadata": {"ownerKey": owner_key, "hasBody": bool(body.strip())},
+            "config_snapshot": {},
+            "body": body,
+            "files": ["SKILL.md", *[str(document.get("documentKey") or "") for document in documents or []]],
+            "documents": [
+                {
+                    "document_key": "SKILL.md",
+                    "title": "기본 지침",
+                    "content": body,
+                    "content_format": "markdown",
+                },
+                *[
+                    {
+                        "document_key": str(document.get("documentKey") or ""),
+                        "title": str(document.get("title") or ""),
+                        "content": str(document.get("content") or ""),
+                        "content_format": "markdown",
+                    }
+                    for document in documents or []
+                ],
+            ],
+        }
+        self.user_settings[(owner_key, skill_id)] = True
+        return self.get_user_skill_detail(owner_key=owner_key, skill_id=skill_id) or self.catalog[skill_id]
+
+    def delete_custom_skill(self, *, owner_key: str, skill_id: str) -> dict[str, Any] | None:
+        item = self.get_user_skill(owner_key=owner_key, skill_id=skill_id)
+        if item is None or item.get("source_type") != "custom":
+            return None
+        removed = self.catalog.pop(skill_id, None)
+        if removed is None:
+            return None
+        for key in list(self.user_settings):
+            if key[1] == skill_id:
+                self.user_settings.pop(key, None)
+        for profile_id, skill_ids in list(self.agent_settings.items()):
+            self.agent_settings[profile_id] = [item for item in skill_ids if item != skill_id]
+        return dict(item)
+
+    def list_runtime_custom_skills(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": str(item.get("name") or ""),
+                "description": str(item.get("description") or ""),
+                "path": str(item.get("source_path") or ""),
+                "body": str(item.get("body") or ""),
+                "metadata": dict(item.get("metadata") or {}),
+            }
+            for item in self.catalog.values()
+            if item.get("source_type") == "custom"
+        ]
+
     def set_agent_skill_settings(self, *, profile_id: str, skill_ids: list[str]) -> None:
         self.agent_settings[profile_id] = [skill_id for skill_id in dict.fromkeys(skill_ids) if skill_id in self.catalog]
 
