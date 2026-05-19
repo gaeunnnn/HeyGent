@@ -13,21 +13,15 @@ export function SubAgentList({
 }) {
   return (
     <section className="space-y-3">
-      <div>
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-medium">서브 에이전트</h2>
-          <button
-            type="button"
-            onClick={onCreate}
-            className="border-border hover:bg-accent/50 inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs font-medium transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            추가
-          </button>
-        </div>
-        <p className="text-muted-foreground mt-1 text-xs">
-          이 세션에서 팀장 에이전트가 호출할 수 있는 에이전트를 구성합니다.
-        </p>
+      <div className="flex items-center justify-end">
+        <button
+          type="button"
+          onClick={onCreate}
+          className="border-border hover:bg-accent/50 inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs font-medium transition-colors"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          추가
+        </button>
       </div>
 
       <div className="border-border border">
