@@ -132,7 +132,10 @@ export function AgentSprite({
       onTransitionEnd={(e) => {
         if (state === 'walking' && e.propertyName === 'transform') onArrived(config.id)
       }}
-      onClick={(e) => onClick?.(config.id, { clientX: e.clientX, clientY: e.clientY })}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(config.id, { clientX: e.clientX, clientY: e.clientY })
+      }}
       onMouseEnter={() => isInteractive && setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >

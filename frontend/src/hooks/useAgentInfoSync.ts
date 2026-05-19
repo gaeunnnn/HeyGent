@@ -4,6 +4,7 @@ import type { AgentActivityStatus, TaskStatus, VisualizationTask } from '@/compo
 import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import { useAgentVisualizationStore } from '@/store/useAgentVisualizationStore'
 import { useTaskRunStore } from '@/store/useTaskRunStore'
+import type { AgentPanelItem } from '@/store/useSessionStore'
 import type { RawStepRun, RawTaskRun } from '@/types/taskRuns'
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'CANCELLED'])
@@ -164,7 +165,11 @@ type CachedSubAgentProfile = {
   profileImage?: string
 }
 
-export function useAgentInfoSync(sessionId?: string, profileIdMap?: Record<string, string>) {
+export function useAgentInfoSync(
+  sessionId?: string,
+  profileIdMap?: Record<string, string>,
+  agentPanels?: AgentPanelItem[],
+) {
   const taskRunsById = useTaskRunStore((s) => s.taskRunsById)
   const stepRunsById = useTaskRunStore((s) => s.stepRunsById)
   const fetchSessionTaskRuns = useTaskRunStore((s) => s.fetchSessionTaskRuns)
@@ -242,14 +247,27 @@ export function useAgentInfoSync(sessionId?: string, profileIdMap?: Record<strin
     }
   }, [fetchSessionTaskRuns, sessionId, taskRunsById, updateAgentInfo])
 
-  // profileIdMap이 늦게 채워지면 캐시된 프로필 데이터를 올바른 spriteId로 재매핑한다.
+  // profileIdMap이 늦게 채워지거나 agentPanels(이름·역할 등)가 바뀌면 agentInfoMap을 갱신한다.
+  // agentPanels의 최신 값을 캐시 데이터보다 우선 적용해 사이드바 수정이 즉시 반영되도록 한다.
   useEffect(() => {
     if (!profileIdMap) return
     for (const [profileId, spriteId] of Object.entries(profileIdMap)) {
-      const profileData = cachedProfilesRef.current.get(profileId)
-      if (profileData) updateAgentInfo(spriteId, profileData)
+      const cachedData = cachedProfilesRef.current.get(profileId)
+      if (!cachedData) continue
+      const panel = agentPanels?.find((p) => p.agent.profileId === profileId)
+      const profileData: typeof cachedData = panel
+        ? {
+            ...cachedData,
+            name: panel.agent.name,
+            role: panel.agent.role ?? cachedData.role,
+            ...(panel.agent.profileImage !== undefined
+              ? { profileImage: panel.agent.profileImage ?? undefined }
+              : {}),
+          }
+        : cachedData
+      updateAgentInfo(spriteId, profileData)
     }
-  }, [profileIdMap, updateAgentInfo])
+  }, [profileIdMap, updateAgentInfo, agentPanels])
 
   useEffect(() => {
     const updatesBySpriteId = new Map<
