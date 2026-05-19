@@ -559,10 +559,12 @@ class _FakeDurableConnection:
         self.step_anchors: dict[str, dict] = {}
         self.worker_handoffs: dict[str, dict] = {}
         self.agent_profiles: dict[tuple[str, str, int], dict] = {}
+        self.executed: list[tuple[str, tuple | None]] = []
         self.commits = 0
 
     def execute(self, sql: str, params: tuple | None = None):
         normalized = " ".join(sql.split())
+        self.executed.append((normalized, params))
         if normalized.startswith("INSERT INTO run_anchors"):
             (
                 task_run_id,
@@ -608,8 +610,14 @@ class _FakeDurableConnection:
                 "agent_config_snapshot": agent_config_snapshot,
                 "anchor_payload": anchor_payload,
             }
-        elif normalized.startswith("SELECT * FROM run_anchors"):
+        elif normalized.startswith("SELECT * FROM run_anchors WHERE"):
             return _FakeCursor([self.run_anchors[params[0]]] if params[0] in self.run_anchors else [])
+        elif normalized.startswith("SELECT * FROM run_anchors ORDER"):
+            return _FakeCursor(list(self.run_anchors.values()))
+        elif normalized.startswith("SELECT COUNT(*) FROM run_anchors"):
+            return _FakeCursor([{"count": len(self._filtered_run_anchor_rows(normalized, params or ()))}])
+        elif normalized.startswith("SELECT task_run_id, owner_key, session_key"):
+            return _FakeCursor(self._filtered_run_anchor_rows(normalized, params or ()))
         elif normalized.startswith("INSERT INTO step_anchors"):
             step_run_id, task_run_id, parent_step_run_id, worker_session_id, step_order, step_type, durable_status, anchor_payload = params
             self.step_anchors[step_run_id] = {
@@ -632,6 +640,32 @@ class _FakeDurableConnection:
 
     def commit(self):
         self.commits += 1
+
+    def _filtered_run_anchor_rows(self, normalized_sql: str, params: tuple) -> list[dict]:
+        filter_params = params[:-2] if "LIMIT %s OFFSET %s" in normalized_sql else params
+        task_statuses = {"PENDING", "RUNNING", "WAITING", "BLOCKED", "COMPLETED", "FAILED", "CANCELED"}
+        statuses = {value for value in filter_params if value in task_statuses}
+        owner_key = None
+        session_key = None
+        if "owner_key = %s" in normalized_sql and "session_key = %s" in normalized_sql:
+            owner_key = filter_params[-2]
+            session_key = filter_params[-1]
+        elif "owner_key = %s" in normalized_sql:
+            owner_key = filter_params[-1]
+        elif "session_key = %s" in normalized_sql:
+            session_key = filter_params[-1]
+        rows = []
+        for row in self.run_anchors.values():
+            payload = json.loads(row["anchor_payload"]) if isinstance(row.get("anchor_payload"), str) else row.get("anchor_payload", {})
+            task_payload = payload.get("task") or {}
+            if statuses and task_payload.get("status") not in statuses:
+                continue
+            if owner_key is not None and str(row.get("owner_key")) != str(owner_key):
+                continue
+            if session_key is not None and row.get("session_key") != session_key:
+                continue
+            rows.append(row)
+        return rows
 
 
 def test_postgres_durable_repository_upserts_run_and_step_anchors():
@@ -785,6 +819,58 @@ def test_postgres_task_repository_marks_completed_claim_as_terminal():
     assert anchor["lease_expires_at"] is None
     assert anchor["heartbeat_at"] is None
     assert anchor["anchor_payload"]["task"]["queue_status"] == "terminal"
+
+
+def test_postgres_task_repository_filters_statuses_in_sql_without_loading_all_run_anchors():
+    connection = _FakeDurableConnection()
+    repository = PostgresTaskRepository(lambda: connection)
+    repository.create_task(
+        TaskRun(
+            task_run_id="task_pg_active_owner",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session_pg_active",
+            status="RUNNING",
+        )
+    )
+    repository.create_task(
+        TaskRun(
+            task_run_id="task_pg_active_other_owner",
+            task_type="agent.loop",
+            owner_key="43",
+            session_key="session_pg_active",
+            status="RUNNING",
+        )
+    )
+    repository.create_task(
+        TaskRun(
+            task_run_id="task_pg_terminal_owner",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session_pg_active",
+            status="COMPLETED",
+        )
+    )
+    connection.executed.clear()
+
+    total = repository.count_tasks_by_statuses(
+        ["PENDING", "RUNNING", "WAITING", "BLOCKED"],
+        owner_key="42",
+        session_key="session_pg_active",
+    )
+    tasks = repository.list_tasks_by_statuses(
+        ["PENDING", "RUNNING", "WAITING", "BLOCKED"],
+        owner_key="42",
+        session_key="session_pg_active",
+        limit=10,
+        offset=0,
+    )
+
+    assert total == 1
+    assert [task.task_run_id for task in tasks] == ["task_pg_active_owner"]
+    assert any(sql.startswith("SELECT COUNT(*) FROM run_anchors") for sql, _ in connection.executed)
+    assert any("anchor_payload" in sql and "FROM run_anchors" in sql for sql, _ in connection.executed)
+    assert not any(sql.startswith("SELECT * FROM run_anchors ORDER") for sql, _ in connection.executed)
 
 
 def test_postgres_task_repository_recovers_stale_running_task_as_terminal():

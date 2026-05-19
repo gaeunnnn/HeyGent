@@ -77,6 +77,7 @@ class LocalToolRuntime:
                 "mattermost.send": self._send_mattermost_message,
                 "notion.execute": self._execute_notion,
                 "gmail.execute": self._execute_gmail,
+                "health.execute": self._execute_health,
                 "design.list_presets": self._list_design_presets,
                 "design.read_preset": self._read_design_preset,
                 "prototype.get_active_artifact": self._get_active_prototype_artifact,
@@ -622,6 +623,13 @@ class LocalToolRuntime:
         return self._run_external_tool_handler(
             "app.tools.gmail.gmail_tool",
             "execute_gmail_handler",
+            args,
+        )
+
+    def _execute_health(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._run_external_tool_handler(
+            "app.tools.health.health_tool",
+            "execute_health_handler",
             args,
         )
 
@@ -1211,6 +1219,11 @@ class LocalToolRuntime:
             trusted_args.pop("user_id", None)
             trusted_args["_trusted_user_id"] = self.owner_key
         if tool_name == "gmail.execute":
+            # 사용자 식별자는 모델 인자가 아니라 서버가 바인딩한 owner_key만 신뢰한다.
+            trusted_args.pop("userId", None)
+            trusted_args.pop("user_id", None)
+            trusted_args["_trusted_user_id"] = self.owner_key
+        if tool_name == "health.execute":
             # 사용자 식별자는 모델 인자가 아니라 서버가 바인딩한 owner_key만 신뢰한다.
             trusted_args.pop("userId", None)
             trusted_args.pop("user_id", None)

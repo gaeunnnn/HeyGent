@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.api.http.agents import (
@@ -112,6 +113,59 @@ def test_k_service_template_includes_srt_booking_and_secrets_document():
     assert "SECRETS.md" in documents["AGENTS.md"]
 
 
+def test_health_template_includes_health_condition_skill():
+    template_by_key = {template.template_key: template for template in BUILTIN_AGENT_TEMPLATES}
+    template = template_by_key["health_agent"]
+
+    assert "health_agent" in DEFAULT_SESSION_TEMPLATE_KEYS
+    assert template.display_name == "헬스 에이전트"
+    assert template.skills == ("health-condition-check",)
+    assert "건강정보" in template.description
+    assert "생활 활동 데이터" in template.description
+    assert "몸 상태가 괜찮은지" in template.description
+    assert "하루 페이스" in template.description
+    assert "건강 데이터 추세" in template.description
+    assert "발표·업무" not in template.description
+    assert "의료 진단" in template.description
+    joined_documents = "\n".join(document for _, _, document in template.documents)
+    assert "의도분류" not in joined_documents
+    assert "health.execute" in joined_documents
+    assert "step_count" in joined_documents
+    assert "duration_minutes" in joined_documents
+    assert "건강정보 참고 코칭" in joined_documents
+    assert "AASM/SRS" in joined_documents
+    assert "`건강 데이터 요약`, `근거`, `주의할 점`, `추천 행동`, `참고`" in joined_documents
+    assert "수면: 사용자 데이터 → 짧은 해석" in joined_documents
+    assert "의학적 진단이나 치료 조언을 대체하지 않는다" in joined_documents
+
+
+def test_health_skill_references_include_research_sources_and_safe_policy():
+    skill_root = Path(__file__).resolve().parents[2] / "app" / "skills" / "health" / "condition-check"
+    evidence = (skill_root / "references" / "evidence-map.md").read_text(encoding="utf-8")
+    policy = (skill_root / "references" / "response-policy.md").read_text(encoding="utf-8")
+
+    assert "AASM/SRS 성인 수면 시간 합의문" in evidence
+    assert "WHO 신체활동 및 좌식행동 가이드라인" in evidence
+    assert "2025 AHA/ACC 성인 고혈압 가이드라인" in evidence
+    assert "스마트워치 BIA 체성분 추정 연구" in evidence
+    assert "PMID: 38759474" in evidence
+    assert "https://pubmed.ncbi.nlm.nih.gov/40811516/" in evidence
+    assert "이 응답은 의학적인 조언입니다" in policy
+    assert "의학적 진단이나 치료 조언을 대체하지 않습니다" in policy
+    assert "`건강 데이터 요약`, `근거`, `주의할 점`, `추천 행동`, `참고`" in policy
+    assert "사용자 데이터 → 짧은 해석" in policy
+    assert "정확히 3줄만 작성" in policy
+    assert "근거 기반 컨디션 판단" not in policy
+
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    assert "피로감" in skill
+    assert "운동 가능 여부" in skill
+    assert "몸 상태가 괜찮은지" in skill
+    assert "건강 데이터 요약:" in skill
+    assert "주의할 점:" in skill
+    assert "사용자 데이터 → 짧은 해석" in skill
+
+
 def test_builtin_subagent_profile_images_point_to_frontend_assets():
     for template in BUILTIN_AGENT_TEMPLATES:
         assert not template.profile_image.startswith("/assets/agents/sub/")
@@ -163,6 +217,8 @@ def test_visible_builtin_templates_are_routing_focused_agents():
         "qa",
         "ux_designer",
         "k_services",
+        "health_agent",
+        "gmail_agent",
     ]
 
 

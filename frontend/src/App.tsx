@@ -1,4 +1,5 @@
 import { Key, Monitor } from 'lucide-react'
+import type { ReactNode } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router'
 import { LeftSidebar } from '@/components/layout/LeftSidebar'
@@ -313,7 +314,7 @@ function SessionShell() {
     </div>
   ) : null
 
-  let overlayNode: JSX.Element | null = null
+  let overlayNode: ReactNode = null
   if (isChat) {
     overlayNode = <ChatSessionPage />
   } else if (activePanel !== null && activePanel !== 'visualization') {

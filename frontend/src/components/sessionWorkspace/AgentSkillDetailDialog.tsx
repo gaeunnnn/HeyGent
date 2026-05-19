@@ -46,7 +46,7 @@ export function AgentSkillDetailDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[86vh] max-w-5xl overflow-hidden p-0">
-        <DialogHeader className="border-border border-b px-5 py-4">
+        <DialogHeader className="border-border selectable-text border-b px-5 py-4">
           <DialogTitle>{detail?.displayName ?? '스킬 상세'}</DialogTitle>
           <DialogDescription className="line-clamp-3">
             {detail?.description ?? '스킬 문서를 확인합니다.'}
@@ -95,7 +95,7 @@ export function AgentSkillDetailDialog({
                   {selectedDocument?.title ?? '문서 없음'}
                 </span>
               </div>
-              <div className="h-[calc(68vh-2.5rem)] overflow-y-auto px-5 py-4">
+              <div className="selectable-text h-[calc(68vh-2.5rem)] overflow-y-auto px-5 py-4">
                 {selectedDocument?.content ? (
                   <div className="prose prose-sm dark:prose-invert max-w-none">
                     <ChatMarkdown content={selectedDocument.content} />
