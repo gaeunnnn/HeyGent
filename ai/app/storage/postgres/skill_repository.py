@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 SECRET_FILE_NAME_PATTERN = ("secret", "secrets", "token", "password", "passwd", "credential", "credentials", "env")
+CUSTOM_SKILL_SOURCE_PREFIX = "custom://"
+MAX_CUSTOM_SKILL_BODY_CHARS = 80_000
+MAX_CUSTOM_SKILL_DOCUMENT_CHARS = 80_000
 
 
 class PostgresSkillRepository:
@@ -64,9 +68,11 @@ class PostgresSkillRepository:
             LEFT JOIN ai_user_skill_settings s
               ON s.skill_id = c.skill_id
              AND s.owner_key = %s
+            WHERE c.source_type <> 'custom'
+               OR c.metadata->>'ownerKey' = %s
             ORDER BY c.name ASC
             """,
-            (owner_key,),
+            (owner_key, owner_key),
         ).fetchall()
         items = [_skill_from_row(row) for row in rows]
         if items:
@@ -90,8 +96,12 @@ class PostgresSkillRepository:
             """
             SELECT * FROM ai_skill_catalog
             WHERE skill_id = %s
+              AND (
+                source_type <> 'custom'
+                OR metadata->>'ownerKey' = %s
+              )
             """,
-            (skill_id,),
+            (skill_id, owner_key),
         ).fetchone()
         if row is None:
             return None
@@ -131,8 +141,12 @@ class PostgresSkillRepository:
               ON s.skill_id = c.skill_id
              AND s.owner_key = %s
             WHERE c.skill_id = %s
+              AND (
+                c.source_type <> 'custom'
+                OR c.metadata->>'ownerKey' = %s
+              )
             """,
-            (owner_key, skill_id),
+            (owner_key, skill_id, owner_key),
         ).fetchone()
         return _skill_from_row(row) if row is not None else None
 
@@ -140,10 +154,139 @@ class PostgresSkillRepository:
         item = self.get_user_skill(owner_key=owner_key, skill_id=skill_id)
         if item is None:
             return None
-        item["body"] = _read_skill_body(item.get("source_path"))
-        item["files"] = _list_skill_files(item.get("source_path"))
-        item["documents"] = _read_skill_documents(item.get("source_path"))
+        if _is_custom_skill_item(item):
+            item["body"] = _custom_skill_body(item)
+            item["files"] = _custom_skill_files(item)
+            item["documents"] = _custom_skill_documents(item)
+        else:
+            item["body"] = _read_skill_body(item.get("source_path"))
+            item["files"] = _list_skill_files(item.get("source_path"))
+            item["documents"] = _read_skill_documents(item.get("source_path"))
         return item
+
+    def create_custom_skill(
+        self,
+        *,
+        owner_key: str,
+        owner_user_id: int | None,
+        name: str,
+        display_name: str,
+        description: str,
+        body: str,
+        documents: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        normalized_name = _normalize_skill_name(name)
+        normalized_body = _ensure_skill_frontmatter(
+            body=body,
+            name=normalized_name,
+            description=description,
+        )
+        display_name = display_name.strip() or _display_name(normalized_name)
+        description = description.strip() or str(_markdown_frontmatter(normalized_body).get("description") or "")
+        documents_payload = _normalize_custom_documents(documents or [])
+        metadata = {
+            "hasBody": bool(normalized_body.strip()),
+            "ownerKey": owner_key,
+            "body": normalized_body,
+            "documents": documents_payload,
+        }
+        skill_id = f"custom:{owner_key}:{normalized_name}"
+        source_path = f"{CUSTOM_SKILL_SOURCE_PREFIX}{skill_id}/SKILL.md"
+        connection = self.connection_factory()
+        connection.execute(
+            """
+            INSERT INTO ai_skill_catalog (
+                skill_id, name, display_name, description, source_type, source_path, default_enabled, metadata
+            )
+            VALUES (%s, %s, %s, %s, 'custom', %s, true, %s::jsonb)
+            ON CONFLICT (skill_id) DO UPDATE
+            SET name = EXCLUDED.name,
+                display_name = EXCLUDED.display_name,
+                description = EXCLUDED.description,
+                source_path = EXCLUDED.source_path,
+                default_enabled = EXCLUDED.default_enabled,
+                metadata = EXCLUDED.metadata,
+                version = ai_skill_catalog.version + 1,
+                updated_at = now()
+            """,
+            (
+                skill_id,
+                normalized_name,
+                display_name,
+                description,
+                source_path,
+                _json(metadata),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_user_skill_settings (
+                owner_key, owner_user_id, skill_id, enabled
+            )
+            VALUES (%s, %s, %s, true)
+            ON CONFLICT (owner_key, skill_id) DO UPDATE
+            SET enabled = true,
+                owner_user_id = EXCLUDED.owner_user_id,
+                updated_at = now()
+            """,
+            (owner_key, owner_user_id, skill_id),
+        )
+        connection.commit()
+        item = self.get_user_skill_detail(owner_key=owner_key, skill_id=skill_id)
+        if item is None:
+            raise KeyError(skill_id)
+        return item
+
+    def delete_custom_skill(self, *, owner_key: str, skill_id: str) -> dict[str, Any] | None:
+        item = self.get_user_skill(owner_key=owner_key, skill_id=skill_id)
+        if item is None or not _is_custom_skill_item(item):
+            return None
+        connection = self.connection_factory()
+        connection.execute(
+            """
+            DELETE FROM ai_agent_skill_settings
+            WHERE skill_id = %s
+            """,
+            (skill_id,),
+        )
+        connection.execute(
+            """
+            DELETE FROM ai_user_skill_settings
+            WHERE skill_id = %s
+            """,
+            (skill_id,),
+        )
+        connection.execute(
+            """
+            DELETE FROM ai_skill_catalog
+            WHERE skill_id = %s
+              AND source_type = 'custom'
+              AND metadata->>'ownerKey' = %s
+            """,
+            (skill_id, owner_key),
+        )
+        connection.commit()
+        return item
+
+    def list_runtime_custom_skills(self) -> list[dict[str, Any]]:
+        rows = self.connection_factory().execute(
+            """
+            SELECT
+                skill_id,
+                name,
+                display_name,
+                description,
+                source_type,
+                source_path,
+                version,
+                default_enabled,
+                metadata
+            FROM ai_skill_catalog
+            WHERE source_type = 'custom'
+            ORDER BY name ASC
+            """
+        ).fetchall()
+        return [_runtime_custom_skill(_skill_from_row(row)) for row in rows]
 
     def set_agent_skill_settings(self, *, profile_id: str, skill_ids: list[str]) -> None:
         normalized = _unique_texts(skill_ids)
@@ -186,9 +329,13 @@ class PostgresSkillRepository:
               ON s.skill_id = c.skill_id
              AND s.owner_key = %s
             WHERE COALESCE(s.enabled, c.default_enabled) = true
+              AND (
+                c.source_type <> 'custom'
+                OR c.metadata->>'ownerKey' = %s
+              )
             ORDER BY c.name ASC
             """,
-            (owner_key,),
+            (owner_key, owner_key),
         ).fetchall()
         enabled_names = {str(_row_get(row, "name") or "").strip() for row in rows}
         enabled_names.discard("")
@@ -211,9 +358,13 @@ class PostgresSkillRepository:
                 JOIN ai_skill_catalog c ON c.skill_id = s.skill_id
                 WHERE s.profile_id = %s
                   AND s.enabled = true
+                  AND (
+                    c.source_type <> 'custom'
+                    OR c.metadata->>'ownerKey' = %s
+                  )
                 ORDER BY c.name ASC
                 """,
-                (profile_id,),
+                (profile_id, owner_key),
             ).fetchall()
             agent_names = {str(_row_get(row, "name") or "").strip() for row in agent_rows}
             agent_names.discard("")
@@ -268,6 +419,129 @@ def _skill_from_row(row: Any) -> dict[str, Any]:
 
 def _display_name(name: str) -> str:
     return name.replace("-", " ").strip().title() or name
+
+
+def _is_custom_skill_item(item: dict[str, Any]) -> bool:
+    return str(item.get("source_type") or "") == "custom"
+
+
+def _runtime_custom_skill(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return {
+        "name": str(item.get("name") or "").strip(),
+        "description": str(item.get("description") or "").strip(),
+        "path": str(item.get("source_path") or ""),
+        "body": str(metadata.get("body") or ""),
+        "metadata": {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"body"}
+        },
+    }
+
+
+def _custom_skill_body(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return str(metadata.get("body") or "")
+
+
+def _custom_skill_files(item: dict[str, Any]) -> list[str]:
+    files = ["SKILL.md"] if _custom_skill_body(item).strip() else []
+    for document in _custom_skill_documents(item):
+        document_key = str(document.get("document_key") or "").strip()
+        if document_key and document_key not in files:
+            files.append(document_key)
+    return files
+
+
+def _custom_skill_documents(item: dict[str, Any]) -> list[dict[str, str]]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    body = str(metadata.get("body") or "")
+    documents: list[dict[str, str]] = []
+    if body.strip():
+        documents.append(
+            {
+                "document_key": "SKILL.md",
+                "title": "기본 지침",
+                "content": _strip_markdown_frontmatter(body),
+                "content_format": "markdown",
+            }
+        )
+    raw_documents = metadata.get("documents") if isinstance(metadata.get("documents"), list) else []
+    for raw_document in raw_documents:
+        if not isinstance(raw_document, dict):
+            continue
+        document_key = str(raw_document.get("documentKey") or raw_document.get("document_key") or "").strip()
+        content = str(raw_document.get("content") or "")
+        title = str(raw_document.get("title") or "").strip() or _humanize_skill_document_name(Path(document_key))
+        if not document_key or not content:
+            continue
+        documents.append(
+            {
+                "document_key": document_key,
+                "title": title,
+                "content": content,
+                "content_format": "markdown",
+            }
+        )
+    return documents
+
+
+def _normalize_skill_name(value: str) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    text = re.sub(r"[^a-z0-9-]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    if not text:
+        raise ValueError("skill name is required")
+    if len(text) > 64:
+        raise ValueError("skill name is too long")
+    return text
+
+
+def _ensure_skill_frontmatter(*, body: str, name: str, description: str) -> str:
+    text = str(body or "").strip()
+    if not text:
+        raise ValueError("skill body is required")
+    if len(text) > MAX_CUSTOM_SKILL_BODY_CHARS:
+        raise ValueError("skill body is too long")
+    metadata = _markdown_frontmatter(text)
+    if metadata.get("name") and metadata.get("description"):
+        return text
+    stripped = _strip_markdown_frontmatter(text)
+    safe_description = str(description or metadata.get("description") or "").strip()
+    frontmatter = ["---", f"name: {name}", f"description: {safe_description}", "---", ""]
+    return "\n".join(frontmatter) + stripped.lstrip("\n")
+
+
+def _normalize_custom_documents(values: list[dict[str, str]]) -> list[dict[str, str]]:
+    documents: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        document_key = str(value.get("documentKey") or value.get("document_key") or "").strip().replace("\\", "/")
+        content = str(value.get("content") or "")
+        if not document_key or not content:
+            continue
+        relative_path = Path(document_key)
+        if relative_path.is_absolute() or _is_hidden_or_secret_skill_file(relative_path):
+            continue
+        if document_key == "SKILL.md" or ".." in relative_path.parts:
+            continue
+        if not document_key.endswith(".md"):
+            document_key = f"{document_key}.md"
+        if document_key in seen or len(content) > MAX_CUSTOM_SKILL_DOCUMENT_CHARS:
+            continue
+        seen.add(document_key)
+        documents.append(
+            {
+                "documentKey": document_key,
+                "title": str(value.get("title") or "").strip() or _humanize_skill_document_name(relative_path),
+                "content": content,
+                "contentFormat": "markdown",
+            }
+        )
+        if len(documents) >= 20:
+            break
+    return documents
 
 
 def _read_skill_body(source_path: Any) -> str:

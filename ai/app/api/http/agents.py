@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from app.api.deps.http_auth import authenticate_http_user, ensure_owner
@@ -13,6 +18,10 @@ from app.contracts.agents import (
     AgentProfileResponse,
     AgentTemplateListResponse,
     AgentTemplateResponse,
+    CreateCustomSkillRequest,
+    CustomSkillDraftResponse,
+    GenerateCustomSkillDraftRequest,
+    ImportCustomSkillUrlRequest,
     CreateSessionAgentRequest,
     CreateSessionAgentFromTemplateRequest,
     SaveInstructionDocumentRequest,
@@ -23,10 +32,12 @@ from app.contracts.agents import (
     UpdateSessionAgentRequest,
 )
 from app.domain.agents.secret_store import AgentSecretStoreNotConfigured
+from app.domain.providers.model.base import AgentMessage
 
 router = APIRouter(tags=["agents"], dependencies=[Depends(document_bearer_auth)])
 
 REMOVED_INSTRUCTION_DOCUMENT_KEYS = {"HEARTBEAT.md"}
+MAX_SKILL_IMPORT_BYTES = 200_000
 
 
 @router.get("/agent-templates", response_model=AgentTemplateListResponse, summary="에이전트 예시 목록 조회")
@@ -45,6 +56,86 @@ async def list_user_skills(request: Request) -> SkillCatalogListResponse:
         owner_user_id=_int_or_none(user.user_id),
     )
     return SkillCatalogListResponse(items=[_skill_response(item) for item in items])
+
+
+@router.post("/skills", response_model=SkillCatalogDetailResponse, summary="사용자 스킬 추가")
+async def create_custom_skill(
+    request: Request,
+    payload: CreateCustomSkillRequest,
+) -> SkillCatalogDetailResponse:
+    user = await authenticate_http_user(request)
+    repository = _skill_repository_or_404(request)
+    try:
+        item = repository.create_custom_skill(
+            owner_key=str(user.user_id),
+            owner_user_id=_int_or_none(user.user_id),
+            name=payload.name,
+            display_name=payload.display_name or payload.name,
+            description=payload.description,
+            body=payload.body,
+            documents=[
+                {
+                    "documentKey": document.document_key,
+                    "title": document.title or "",
+                    "content": document.content,
+                }
+                for document in payload.documents
+            ],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        if "unique" in str(error).lower():
+            raise HTTPException(status_code=409, detail="skill name already exists") from error
+        raise
+    registry = getattr(request.app.state, "skill_registry", None)
+    if registry is not None:
+        registry.register_many([_runtime_skill_from_detail(item)])
+    return _skill_detail_response(item)
+
+
+@router.post("/skills/draft", response_model=CustomSkillDraftResponse, summary="사용자 스킬 초안 생성")
+async def generate_custom_skill_draft(
+    request: Request,
+    payload: GenerateCustomSkillDraftRequest,
+) -> CustomSkillDraftResponse:
+    user = await authenticate_http_user(request)
+    goal = payload.goal.strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="skill goal is required")
+    draft = await _generate_skill_draft(
+        request,
+        user_prompt=goal,
+        source_text="",
+        source_url=None,
+        user_id=str(user.user_id),
+    )
+    return _skill_draft_response(draft)
+
+
+@router.post("/skills/import-url", response_model=CustomSkillDraftResponse, summary="URL에서 사용자 스킬 가져오기")
+async def import_custom_skill_from_url(
+    request: Request,
+    payload: ImportCustomSkillUrlRequest,
+) -> CustomSkillDraftResponse:
+    user = await authenticate_http_user(request)
+    url = payload.url.strip()
+    if not _is_allowed_skill_import_url(url):
+        raise HTTPException(status_code=400, detail="http or https url is required")
+    fetched_url, content = await _fetch_skill_import_url(url)
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="url content is empty")
+    if _looks_like_skill_markdown(content):
+        draft = _draft_from_skill_markdown(content, source_url=fetched_url)
+    else:
+        draft = await _generate_skill_draft(
+            request,
+            user_prompt="이 URL의 내용을 바탕으로 재사용 가능한 에이전트 스킬을 만들어줘.",
+            source_text=content,
+            source_url=fetched_url,
+            user_id=str(user.user_id),
+        )
+    return _skill_draft_response(draft)
 
 
 @router.get("/skills/{skillId}", response_model=SkillCatalogDetailResponse, summary="사용자 스킬 상세 조회")
@@ -80,6 +171,26 @@ async def update_user_skill_setting(
     if item is None:
         raise HTTPException(status_code=404, detail="skill not found")
     return _skill_response(item)
+
+
+@router.delete("/skills/{skillId}", summary="사용자 생성 스킬 삭제")
+async def delete_custom_skill(
+    request: Request,
+    skillId: str = Path(..., description="삭제할 사용자 생성 스킬 ID입니다."),
+) -> Response:
+    user = await authenticate_http_user(request)
+    repository = _skill_repository_or_404(request)
+    deleted = repository.delete_custom_skill(
+        owner_key=str(user.user_id),
+        skill_id=skillId,
+    )
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="custom skill not found")
+    registry = getattr(request.app.state, "skill_registry", None)
+    unregister = getattr(registry, "unregister_names", None)
+    if callable(unregister):
+        unregister([str(deleted.get("name") or "")])
+    return Response(status_code=204)
 
 
 @router.get(
@@ -568,6 +679,309 @@ def _skill_detail_response(item: dict[str, Any]) -> SkillCatalogDetailResponse:
             for document in list(item.get("documents") or [])
         ],
     )
+
+
+def _runtime_skill_from_detail(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return {
+        "name": str(item.get("name") or "").strip(),
+        "description": str(item.get("description") or "").strip(),
+        "path": str(item.get("source_path") or ""),
+        "body": str(item.get("body") or metadata.get("body") or ""),
+        "metadata": {
+            key: value
+            for key, value in metadata.items()
+            if key != "body"
+        },
+    }
+
+
+def _skill_draft_response(item: dict[str, Any]) -> CustomSkillDraftResponse:
+    return CustomSkillDraftResponse(
+        name=str(item.get("name") or ""),
+        displayName=str(item.get("display_name") or item.get("displayName") or item.get("name") or ""),
+        description=str(item.get("description") or ""),
+        body=str(item.get("body") or ""),
+        sourceUrl=str(item.get("source_url") or item.get("sourceUrl") or "") or None,
+        documents=[
+            {
+                "documentKey": str(document.get("document_key") or document.get("documentKey") or ""),
+                "title": str(document.get("title") or ""),
+                "content": str(document.get("content") or ""),
+                "contentFormat": str(document.get("content_format") or document.get("contentFormat") or "markdown"),
+            }
+            for document in list(item.get("documents") or [])
+            if isinstance(document, dict)
+        ],
+    )
+
+
+async def _generate_skill_draft(
+    request: Request,
+    *,
+    user_prompt: str,
+    source_text: str,
+    source_url: str | None,
+    user_id: str,
+) -> dict[str, Any]:
+    registry = getattr(request.app.state, "provider_registry", None)
+    if registry is None:
+        raise HTTPException(status_code=503, detail="model provider is not configured")
+    try:
+        provider = registry.preferred_model_provider()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="model provider is not available") from error
+    model = str(getattr(request.app.state.settings, "openai_response_model", "") or "gpt-5.4")
+    messages = [
+        AgentMessage(
+            role="system",
+            content=(
+                "사용자의 설명을 에이전트 skill 초안으로 만든다. JSON 객체만 반환한다. "
+                "필드: name, displayName, description, body, documents. "
+                "name은 영문 소문자, 숫자, 하이픈만 쓰는 짧은 key다. "
+                "displayName과 description은 쉬운 한국어로 쓴다. "
+                "body는 SKILL.md 전체 markdown이며 YAML frontmatter에 name과 description을 포함한다. "
+                "body 본문은 에이전트가 언제 이 스킬을 써야 하는지, 어떤 순서로 작업할지, 확인 기준을 담는다. "
+                "documents는 꼭 필요한 보조 문서만 배열로 둔다. 각 항목은 documentKey, title, content를 가진다. "
+                "비밀값, 토큰, 인증 정보, 민감한 로컬 경로는 절대 포함하지 않는다."
+            ),
+        ),
+        AgentMessage(
+            role="user",
+            content=_skill_draft_user_prompt(user_prompt=user_prompt, source_text=source_text, source_url=source_url),
+        ),
+    ]
+    try:
+        response = await asyncio.wait_for(
+            provider.respond_async(
+                messages=messages,
+                tools=[],
+                model=model,
+                runtime_context={
+                    "user_id": user_id,
+                    "provider_name": "openai_api_key",
+                },
+            ),
+            timeout=_skill_draft_timeout_seconds(request),
+        )
+    except TimeoutError as error:
+        raise HTTPException(status_code=504, detail="skill draft generation timed out") from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="skill draft generation failed") from error
+    return _sanitize_skill_draft(response.output_text, source_url=source_url)
+
+
+def _skill_draft_timeout_seconds(request: Request) -> float:
+    configured = getattr(request.app.state.settings, "agent_model_request_timeout_seconds", 120.0)
+    try:
+        value = float(configured)
+    except (TypeError, ValueError):
+        return 120.0
+    return max(30.0, min(value, 120.0))
+
+
+def _skill_draft_user_prompt(*, user_prompt: str, source_text: str, source_url: str | None) -> str:
+    parts = [f"요청:\n{user_prompt[:4000]}"]
+    if source_url:
+        parts.append(f"URL:\n{source_url}")
+    if source_text:
+        parts.append(f"참고 내용:\n{source_text[:12000]}")
+    return "\n\n".join(parts)
+
+
+def _sanitize_skill_draft(value: str, *, source_url: str | None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(_extract_json_object(value))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="skill draft response was not valid json") from error
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="skill draft response was not an object")
+    name = _normalize_skill_key(str(parsed.get("name") or parsed.get("displayName") or "custom-skill"))
+    display_name = str(parsed.get("displayName") or parsed.get("display_name") or name).strip() or name
+    description = str(parsed.get("description") or "").strip()
+    body = str(parsed.get("body") or "").strip()
+    if not body:
+        body = _default_skill_body(name=name, description=description, title=display_name)
+    body = _ensure_skill_body_frontmatter(body=body, name=name, description=description)
+    documents = _sanitize_draft_documents(parsed.get("documents"))
+    return {
+        "name": name,
+        "display_name": display_name,
+        "description": description,
+        "body": body,
+        "documents": documents,
+        "source_url": source_url,
+    }
+
+
+def _draft_from_skill_markdown(content: str, *, source_url: str) -> dict[str, Any]:
+    metadata = _markdown_frontmatter(content)
+    name = _normalize_skill_key(str(metadata.get("name") or "imported-skill"))
+    description = str(metadata.get("description") or "").strip()
+    return {
+        "name": name,
+        "display_name": _display_name(name),
+        "description": description,
+        "body": _ensure_skill_body_frontmatter(body=content.strip(), name=name, description=description),
+        "documents": [],
+        "source_url": source_url,
+    }
+
+
+async def _fetch_skill_import_url(url: str) -> tuple[str, str]:
+    errors: list[str] = []
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+        for candidate in _skill_import_url_candidates(url):
+            try:
+                response = await client.get(candidate, headers={"User-Agent": "HeyGentAI/1.0"})
+                response.raise_for_status()
+                raw = response.content[:MAX_SKILL_IMPORT_BYTES]
+                if not raw.strip():
+                    continue
+                return str(response.url), raw.decode(response.encoding or "utf-8", errors="replace")
+            except httpx.HTTPError as error:
+                errors.append(str(error))
+    raise HTTPException(status_code=400, detail="url content could not be loaded")
+
+
+def _skill_import_url_candidates(url: str) -> list[str]:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    candidates = [url]
+    if host == "github.com":
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 5 and parts[2] == "blob":
+            owner, repo, _, branch = parts[:4]
+            path = "/".join(parts[4:])
+            candidates.insert(0, f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}")
+        elif len(parts) >= 5 and parts[2] == "tree":
+            owner, repo, _, branch = parts[:4]
+            path = "/".join(parts[4:])
+            candidates.insert(0, f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}/SKILL.md")
+        elif len(parts) >= 2:
+            owner, repo = parts[:2]
+            candidates.insert(0, f"https://raw.githubusercontent.com/{owner}/{repo}/main/SKILL.md")
+            candidates.insert(1, f"https://raw.githubusercontent.com/{owner}/{repo}/master/SKILL.md")
+    return list(dict.fromkeys(candidates))
+
+
+def _is_allowed_skill_import_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    host = parsed.hostname or ""
+    return host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def _looks_like_skill_markdown(content: str) -> bool:
+    frontmatter = _markdown_frontmatter(content)
+    return (
+        bool(frontmatter.get("name") or frontmatter.get("description"))
+        and ("use" in content[:4000].lower() or content.lstrip().startswith("---"))
+    )
+
+
+def _sanitize_draft_documents(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    documents: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        document_key = str(item.get("documentKey") or item.get("document_key") or "").strip().replace("\\", "/")
+        content = str(item.get("content") or "").strip()
+        if not document_key or not content:
+            continue
+        if ".." in document_key.split("/") or document_key.startswith("/") or not document_key.endswith(".md"):
+            continue
+        if document_key in seen:
+            continue
+        seen.add(document_key)
+        documents.append(
+            {
+                "documentKey": document_key,
+                "title": str(item.get("title") or document_key.split("/")[-1]).strip(),
+                "content": content[:80_000],
+                "contentFormat": "markdown",
+            }
+        )
+        if len(documents) >= 20:
+            break
+    return documents
+
+
+def _ensure_skill_body_frontmatter(*, body: str, name: str, description: str) -> str:
+    text = body.strip()
+    metadata = _markdown_frontmatter(text)
+    if metadata.get("name") and metadata.get("description"):
+        return text
+    stripped = _strip_markdown_frontmatter(text)
+    return f"---\nname: {name}\ndescription: {description}\n---\n\n{stripped.lstrip()}"
+
+
+def _default_skill_body(*, name: str, description: str, title: str) -> str:
+    return (
+        f"---\nname: {name}\ndescription: {description}\n---\n\n"
+        f"# {title}\n\n"
+        "## 사용 기준\n\n"
+        "- 사용자의 요청이 이 스킬의 목적과 직접 맞을 때 사용한다.\n\n"
+        "## 작업 순서\n\n"
+        "1. 요청의 목표와 필요한 입력을 확인한다.\n"
+        "2. 관련 자료가 있으면 먼저 확인한다.\n"
+        "3. 결과를 사용자가 검토하기 쉽게 정리한다.\n\n"
+        "## 확인 기준\n\n"
+        "- 결과가 사용자 요청의 목적에 맞는지 확인한다.\n"
+    )
+
+
+def _normalize_skill_key(value: str) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    text = re.sub(r"[^a-z0-9-]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return (text or "custom-skill")[:64].rstrip("-") or "custom-skill"
+
+
+def _display_name(name: str) -> str:
+    return name.replace("-", " ").strip().title() or name
+
+
+def _markdown_frontmatter(content: str) -> dict[str, str]:
+    text = content.lstrip("\ufeff")
+    if not text.startswith("---"):
+        return {}
+    match = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, flags=re.DOTALL)
+    if not match:
+        return {}
+    metadata: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        if not line or line.startswith((" ", "\t")) or ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        metadata[key.strip()] = raw_value.strip().strip("'\"")
+    return metadata
+
+
+def _strip_markdown_frontmatter(content: str) -> str:
+    text = content.lstrip("\ufeff")
+    if not text.startswith("---"):
+        return text
+    match = re.match(r"^---\s*\n.*?\n---\s*(?:\n|$)", text, flags=re.DOTALL)
+    if not match:
+        return text
+    return text[match.end() :].lstrip()
+
+
+def _extract_json_object(value: str) -> str:
+    text = str(value or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        return fenced.group(1)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
 
 
 def _agent_visual_key(config: dict[str, Any]) -> str | None:

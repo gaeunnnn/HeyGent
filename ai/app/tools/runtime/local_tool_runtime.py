@@ -311,6 +311,10 @@ class LocalToolRuntime:
                 tool_name="skills.read_file",
             )
 
+        inline_file = self._read_inline_skill_file(skill, args.get("path"))
+        if inline_file is not None:
+            return inline_file
+
         document_path = self._resolve_skill_document_path(skill.get("path"))
         if document_path is None or not self._is_allowed_skill_path(document_path):
             return self._tool_error(
@@ -375,6 +379,16 @@ class LocalToolRuntime:
                 message=f"unknown skill: {skill_name}",
                 tool_name="skill.execute",
             )
+
+        if self._is_inline_skill(skill):
+            return {
+                "ok": True,
+                "skill_name": skill_name,
+                "action": action,
+                "path": str(skill.get("path") or ""),
+                "files": self._list_inline_skill_files(skill),
+                "content": str(skill.get("body") or ""),
+            }
 
         document_path = self._resolve_skill_document_path(skill.get("path"))
         if document_path is not None and not self._is_allowed_skill_path(document_path):
@@ -535,6 +549,67 @@ class LocalToolRuntime:
     def _is_runtime_skill_enabled(self, skill_name: str) -> bool:
         allowed = self._runtime_enabled_skill_names()
         return allowed is None or skill_name in allowed
+
+    def _is_inline_skill(self, skill: dict[str, Any]) -> bool:
+        metadata = skill.get("metadata") if isinstance(skill.get("metadata"), dict) else {}
+        has_inline_body = bool(str(skill.get("body") or "").strip()) and str(skill.get("path") or "").startswith(
+            "custom://"
+        )
+        return has_inline_body or bool(metadata.get("documents"))
+
+    def _list_inline_skill_files(self, skill: dict[str, Any]) -> list[str]:
+        files = ["SKILL.md"] if str(skill.get("body") or "").strip() else []
+        metadata = skill.get("metadata") if isinstance(skill.get("metadata"), dict) else {}
+        raw_documents = metadata.get("documents") if isinstance(metadata.get("documents"), list) else []
+        for document in raw_documents:
+            if not isinstance(document, dict):
+                continue
+            path = str(document.get("documentKey") or document.get("document_key") or "").strip()
+            if path and path not in files and not self._is_secret_skill_file(Path(path)):
+                files.append(path)
+        return files
+
+    def _read_inline_skill_file(self, skill: dict[str, Any], raw_path: Any) -> dict[str, object] | None:
+        path = str(raw_path or "").strip().replace("\\", "/")
+        if not path:
+            return None
+        relative_path = Path(path)
+        if relative_path.is_absolute() or ".." in relative_path.parts or self._is_secret_skill_file(relative_path):
+            return self._tool_error(
+                code="skill_file_not_allowed",
+                message="skill file path must stay inside the selected skill",
+                tool_name="skills.read_file",
+            )
+        if path == "SKILL.md":
+            content = str(skill.get("body") or "")
+            if not content:
+                return None
+            return {
+                "ok": True,
+                "skill_name": str(skill.get("name") or ""),
+                "path": "SKILL.md",
+                "content": content,
+                "bytes_read": len(content.encode("utf-8")),
+                "truncated": False,
+            }
+        metadata = skill.get("metadata") if isinstance(skill.get("metadata"), dict) else {}
+        raw_documents = metadata.get("documents") if isinstance(metadata.get("documents"), list) else []
+        for document in raw_documents:
+            if not isinstance(document, dict):
+                continue
+            document_key = str(document.get("documentKey") or document.get("document_key") or "").strip()
+            if document_key != path:
+                continue
+            content = str(document.get("content") or "")
+            return {
+                "ok": True,
+                "skill_name": str(skill.get("name") or ""),
+                "path": document_key,
+                "content": content,
+                "bytes_read": len(content.encode("utf-8")),
+                "truncated": False,
+            }
+        return None
 
     def _record_session_message(self, args: dict[str, Any]) -> dict[str, object]:
         session_key = str(args.get("session_key") or "runtime-probe")

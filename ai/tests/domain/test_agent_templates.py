@@ -38,6 +38,10 @@ def test_main_agent_template_includes_awesome_design_skill():
     assert "awesome-design" in MAIN_AGENT_TEMPLATE.skills
 
 
+def test_main_agent_template_includes_heygent_skill():
+    assert "heygent" in MAIN_AGENT_TEMPLATE.skills
+
+
 def test_builtin_subagent_templates_default_to_worker_model():
     assert MAIN_AGENT_TEMPLATE.model == "gpt-5.4"
 
@@ -60,6 +64,45 @@ def test_main_agent_template_uses_team_lead_display_copy():
     joined_documents = "\n".join(document for _, _, document in MAIN_AGENT_TEMPLATE.documents)
     assert "팀장 지침" in joined_documents
     assert "CEO 지침" not in joined_documents
+
+
+def test_main_agent_handles_heygent_service_questions_directly():
+    joined_documents = "\n".join(document for _, _, document in MAIN_AGENT_TEMPLATE.documents)
+
+    assert "HeyGent 서비스 질문 응답" in joined_documents
+    assert "HeyGent 서비스 자체" in joined_documents
+    assert "팀장이 직접 답합니다" in joined_documents
+    assert "시연" not in joined_documents
+    assert "발표" not in joined_documents
+    assert "개발 에이전트" not in joined_documents
+    assert "보안 위험 검토" not in joined_documents
+
+
+def test_main_agent_routes_second_person_product_questions_to_heygent_skill():
+    joined_documents = "\n".join(document for _, _, document in MAIN_AGENT_TEMPLATE.documents)
+    skill_root = Path(__file__).resolve().parents[2] / "app" / "skills" / "product" / "heygent"
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    competitive = (skill_root / "references" / "competitive-comparison.md").read_text(encoding="utf-8")
+
+    assert "너가 OpenClaw보다 나은 점" in joined_documents
+    assert "너는 뭐가 좋아" in joined_documents
+    assert "너희 서비스" in joined_documents
+    assert "우리 서비스" in joined_documents
+    assert "이 서비스" in joined_documents
+    assert "heygent` skill" in joined_documents
+    assert "너가 OpenClaw보다 나은 점" in skill
+    assert "너/너희/우리 서비스" in competitive
+
+
+def test_main_agent_openclaw_comparison_prioritizes_three_business_advantages():
+    joined_documents = "\n".join(document for _, _, document in MAIN_AGENT_TEMPLATE.documents)
+
+    assert "OpenClaw 비교 질문은 아래 3가지를 먼저 답합니다" in joined_documents
+    assert joined_documents.index("어디서든 이어지는 나를 기억하는 클라우드 비서") < joined_documents.index("TaskRun")
+    assert joined_documents.index("설치와 운영 부담을 줄인 쉬운 사용성") < joined_documents.index("TaskRun")
+    assert joined_documents.index("EC2 KMS credential 암호화 저장") < joined_documents.index("TaskRun")
+    assert joined_documents.index("Windows 앱 컨테이너") < joined_documents.index("TaskRun")
+    assert "TaskRun/StepRun은 위 3가지를 말한 뒤 보조 근거로만 덧붙입니다" in joined_documents
 
 
 def test_builtin_agent_template_skills_exist_in_builtin_catalog():
@@ -164,6 +207,127 @@ def test_health_skill_references_include_research_sources_and_safe_policy():
     assert "건강 데이터 요약:" in skill
     assert "주의할 점:" in skill
     assert "사용자 데이터 → 짧은 해석" in skill
+
+
+def test_heygent_is_skill_for_team_lead_not_builtin_subagent_template():
+    template_by_key = {template.template_key: template for template in BUILTIN_AGENT_TEMPLATES}
+
+    assert "heygent" not in DEFAULT_SESSION_TEMPLATE_KEYS
+    assert "heygent" not in template_by_key
+
+
+def test_heygent_skill_contains_fast_positive_service_knowledge_index():
+    skill_root = Path(__file__).resolve().parents[2] / "app" / "skills" / "product" / "heygent"
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    overview = (skill_root / "references" / "overview.md").read_text(encoding="utf-8")
+    features = (skill_root / "references" / "features.md").read_text(encoding="utf-8")
+    limitations = (skill_root / "references" / "limitations.md").read_text(encoding="utf-8")
+    product_flow = (skill_root / "references" / "product-flow.md").read_text(encoding="utf-8")
+    all_heygent_skill_text = "\n".join(
+        [
+            skill,
+            overview,
+            features,
+            limitations,
+            product_flow,
+            (skill_root / "references" / "architecture.md").read_text(encoding="utf-8"),
+            (skill_root / "references" / "ai-runtime.md").read_text(encoding="utf-8"),
+            (skill_root / "references" / "strengths.md").read_text(encoding="utf-8"),
+            (skill_root / "references" / "glossary.md").read_text(encoding="utf-8"),
+        ]
+    )
+
+    assert 'name: "heygent"' in skill
+    assert "빠르고 긍정적으로 답할 때 사용합니다" in skill
+    assert "기본 답변은 3~5문장" in skill
+    assert "references/overview.md" in skill
+    assert "references/product-flow.md" in skill
+    assert "AI 오케스트레이션 서비스" in overview
+    assert "TaskRun" in features
+    assert "멀티 디바이스" in features
+    assert "부정적인 결과가 예상되면 짧게만 설명합니다" in limitations
+    assert "그렇지만" in limitations
+    assert "시연" not in all_heygent_skill_text
+    assert "발표" not in all_heygent_skill_text
+
+
+def test_heygent_skill_contains_competitive_question_playbook():
+    skill_root = Path(__file__).resolve().parents[2] / "app" / "skills" / "product" / "heygent"
+    required_reference_names = {
+        "answer-playbook.md",
+        "positioning.md",
+        "capability-map.md",
+        "competitive-comparison.md",
+        "proof-points.md",
+        "security-and-constraints.md",
+        "status-and-roadmap.md",
+    }
+    reference_texts = {
+        name: (skill_root / "references" / name).read_text(encoding="utf-8")
+        for name in required_reference_names
+    }
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    all_heygent_skill_text = "\n".join([skill, *reference_texts.values()])
+
+    for name in required_reference_names:
+        assert f"references/{name}" in skill
+
+    assert "OpenClaw보다 뭐가 나아" in reference_texts["competitive-comparison.md"]
+    assert "ChatGPT" in reference_texts["competitive-comparison.md"]
+    assert "Codex" in reference_texts["competitive-comparison.md"]
+    assert "Claude Code" in reference_texts["competitive-comparison.md"]
+    assert "Cursor" in reference_texts["competitive-comparison.md"]
+    assert "경쟁 서비스를 깎아내리지 않습니다" in reference_texts["competitive-comparison.md"]
+    assert "사용자의 한 문장 요청을 실제 작업 흐름으로 바꾸는 AI 작업 실행 플랫폼" in reference_texts["positioning.md"]
+    assert "TaskRun" in reference_texts["proof-points.md"]
+    assert "StepRun" in reference_texts["proof-points.md"]
+    assert "그렇지만" in reference_texts["answer-playbook.md"]
+    assert "상태와 실행 근거를 보여 주는 방향" in reference_texts["status-and-roadmap.md"]
+    assert "시연" not in all_heygent_skill_text
+    assert "발표" not in all_heygent_skill_text
+
+
+def test_heygent_skill_contains_cloud_memory_easy_security_positioning():
+    skill_root = Path(__file__).resolve().parents[2] / "app" / "skills" / "product" / "heygent"
+    positioning = (skill_root / "references" / "positioning.md").read_text(encoding="utf-8")
+    competitive = (skill_root / "references" / "competitive-comparison.md").read_text(encoding="utf-8")
+    security = (skill_root / "references" / "security-and-constraints.md").read_text(encoding="utf-8")
+    strengths = (skill_root / "references" / "strengths.md").read_text(encoding="utf-8")
+    status = (skill_root / "references" / "status-and-roadmap.md").read_text(encoding="utf-8")
+    all_heygent_skill_text = "\n".join([positioning, competitive, security, strengths, status])
+
+    assert "어디서든 이어지는" in positioning
+    assert "나를 기억하는 비서" in positioning
+    assert "쉽게 사용할 수 있는" in strengths
+    assert ".env 평문" in security
+    assert "EC2 KMS" in security
+    assert "KMS로 암호화 저장" in security
+    assert "암호화 저장" in security
+    assert "Windows 앱 컨테이너" in security
+    assert "레지스트리를 직접 변경하지 못하게" in security
+    assert "클라우드 기반" in competitive
+    assert "설치와 운영 부담" in competitive
+    assert "확정된 보안 차별점" in competitive
+    assert "배포 환경" in status
+    assert "시연" not in all_heygent_skill_text
+    assert "발표" not in all_heygent_skill_text
+
+
+def test_heygent_openclaw_answer_prioritizes_three_core_advantages():
+    skill_root = Path(__file__).resolve().parents[2] / "app" / "skills" / "product" / "heygent"
+    competitive = (skill_root / "references" / "competitive-comparison.md").read_text(encoding="utf-8")
+    playbook = (skill_root / "references" / "answer-playbook.md").read_text(encoding="utf-8")
+    openclaw_answer_start = competitive.index("## OpenClaw보다 뭐가 나아?")
+    second_person_start = competitive.index("## 2인칭 비교 질문 처리")
+    openclaw_answer = competitive[openclaw_answer_start:second_person_start]
+
+    assert "OpenClaw 비교는 아래 3가지를 먼저 말합니다" in competitive
+    assert openclaw_answer.index("어디서든 이어지는 나를 기억하는 클라우드 비서") < openclaw_answer.index("TaskRun")
+    assert openclaw_answer.index("설치와 운영 부담을 줄인 쉬운 사용성") < openclaw_answer.index("TaskRun")
+    assert openclaw_answer.index("EC2 KMS credential 암호화 저장") < openclaw_answer.index("TaskRun")
+    assert openclaw_answer.index("Windows 앱 컨테이너") < openclaw_answer.index("TaskRun")
+    assert "TaskRun/StepRun은 보조 근거로만 덧붙입니다" in competitive
+    assert "OpenClaw 질문은 클라우드/쉬운 사용/보안을 먼저 답합니다" in playbook
 
 
 def test_builtin_subagent_profile_images_point_to_frontend_assets():

@@ -378,6 +378,53 @@ def test_disabled_skill_readers_are_unavailable_even_with_enabled_skill_context(
     assert file_result["error"]["code"] == "skill_disabled"
 
 
+def test_custom_inline_skill_files_are_read_from_registry_metadata():
+    registry = SkillRegistry()
+    registry.register_many(
+        [
+            {
+                "name": "meeting-notes",
+                "description": "회의 내용을 요약합니다.",
+                "path": "custom://custom:7:meeting-notes/SKILL.md",
+                "body": "# Meeting Notes",
+                "metadata": {
+                    "documents": [
+                        {
+                            "documentKey": "references/style.md",
+                            "content": "# Style",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=registry,
+        session_store=DummySessionStore(),
+        runtime_context={"enabledSkillNames": ["meeting-notes"]},
+    )
+
+    skill_file = runtime.run_call(
+        name="skills.read_file",
+        args={"skill_name": "meeting-notes", "path": "SKILL.md"},
+        enabled_toolsets=("skills",),
+    )
+    reference_file = runtime.run_call(
+        name="skills.read_file",
+        args={"skill_name": "meeting-notes", "path": "references/style.md"},
+        enabled_toolsets=("skills",),
+    )
+    inspected = runtime.run_call(
+        name="skill.execute",
+        args={"skill_name": "meeting-notes", "action": "inspect"},
+        enabled_toolsets=("skills",),
+    )
+
+    assert skill_file["content"] == "# Meeting Notes"
+    assert reference_file["content"] == "# Style"
+    assert inspected["files"] == ["SKILL.md", "references/style.md"]
+
+
 def test_web_is_available_in_local_core_and_safe_without_removed_extract_or_browser_tools():
     assert resolve_runtime_tool_names(("web",)) == {"http_get"}
     assert "http_get" in resolve_runtime_tool_names(("local-core",))
