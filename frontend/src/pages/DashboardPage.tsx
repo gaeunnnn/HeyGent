@@ -16,7 +16,6 @@ import {
   Sparkles,
   Monitor,
   HelpCircle,
-  Bell,
   RefreshCw,
 } from 'lucide-react'
 import { motion } from 'motion/react'
@@ -206,7 +205,8 @@ function BridgeCard() {
     listBridgeDevices()
       .then((devices) => {
         if (cancelled) return
-        const active = devices.filter((device) => device.revokedAt === null)
+        // revokedAt이 truthy(실제 해제 ISO 문자열)일 때만 제외 — null/undefined/"" 등은 정상으로 본다
+        const active = devices.filter((device) => !device.revokedAt)
         setStatus(active.length > 0 ? 'installed' : 'not_installed')
       })
       .catch(() => {
@@ -299,49 +299,6 @@ function BridgeCard() {
   )
 }
 
-// ── LlmTaskNotice ────────────────────────────────────────────────────────────
-function LlmTaskNotice() {
-  const taskEvents: Array<{
-    label: string
-    status: string
-    color: StatusDotProps['color']
-    time: string
-  }> = [
-    { label: '건강 데이터 요약 생성', status: '완료', color: 'emerald', time: '방금 전' },
-    { label: 'IoT 연결 상태 분석', status: '처리 중', color: 'blue', time: '1분 전' },
-    { label: '작업 권장 사항 준비', status: '대기', color: 'muted', time: '2분 전' },
-  ]
-
-  return (
-    <aside className="border-border bg-card/95 rounded-xl border p-3 shadow-sm backdrop-blur">
-      <div className="mb-3 flex items-center gap-2">
-        <div className="bg-muted/70 text-muted-foreground flex h-7 w-7 items-center justify-center rounded-lg">
-          <Bell className="h-3.5 w-3.5" />
-        </div>
-        <div>
-          <p className="text-foreground text-xs font-semibold">LLM 작업 알림</p>
-          <p className="text-muted-foreground text-[11px]">작업 처리 이벤트</p>
-        </div>
-      </div>
-
-      <div className="space-y-3 xl:space-y-4">
-        {taskEvents.map((event) => (
-          <div key={event.label} className="space-y-1">
-            <div className="flex items-start justify-between gap-3">
-              <span className="text-foreground text-xs leading-snug">{event.label}</span>
-              <span className="text-muted-foreground shrink-0 text-[10px]">{event.time}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <StatusDot color={event.color} pulse={event.color === 'blue'} />
-              <span className="text-muted-foreground text-[11px]">{event.status}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-    </aside>
-  )
-}
-
 // ── DeregisterConfirmModal ────────────────────────────────────────────────────
 interface DeregisterConfirmModalProps {
   open: boolean
@@ -376,19 +333,19 @@ function DeregisterConfirmModal({ open, onOpenChange, onConfirm }: DeregisterCon
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => onOpenChange(false)}
-            disabled={loading}
-            className="border-border text-foreground hover:bg-accent/50 flex-1 rounded-xl border py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
-          >
-            취소
-          </button>
-          <button
-            type="button"
             onClick={handleConfirm}
             disabled={loading}
             className="flex-1 rounded-xl bg-red-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
           >
             {loading ? '해제 중...' : '등록 해제'}
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            disabled={loading}
+            className="border-border text-foreground hover:bg-accent/50 flex-1 rounded-xl border py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            취소
           </button>
         </div>
       </DialogContent>
@@ -530,19 +487,19 @@ function PairingModal({ open, onOpenChange, onSuccess }: PairingModalProps) {
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => onOpenChange(false)}
-            disabled={loading}
-            className="border-border text-foreground hover:bg-accent/50 flex-1 rounded-xl border py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
-          >
-            취소
-          </button>
-          <button
-            type="button"
             onClick={handleSubmit}
             disabled={loading}
             className="bg-foreground text-background hover:bg-foreground/85 flex-1 rounded-xl py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
           >
             {loading ? '등록 중...' : '등록하기'}
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            disabled={loading}
+            className="border-border text-foreground hover:bg-accent/50 flex-1 rounded-xl border py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            취소
           </button>
         </div>
       </DialogContent>
@@ -931,7 +888,7 @@ export function DashboardPage() {
 
   return (
     <div className="bg-background flex-1 overflow-y-auto [scrollbar-gutter:stable]">
-      <div className="mx-auto grid w-full max-w-[1290px] grid-cols-1 gap-6 px-6 py-10 xl:grid-cols-[minmax(0,56rem)_18rem] xl:items-start">
+      <div className="mx-auto w-full max-w-4xl px-6 py-10">
         <div className="space-y-8">
           {/* 섹션: 시스템 상태 */}
           <motion.section
@@ -981,7 +938,7 @@ export function DashboardPage() {
             <div className="grid grid-cols-3 gap-3">
               <ActionButton
                 icon={<Eye className="h-4 w-4" />}
-                label="에이전트 상태 보기"
+                label="내 사무실 보기"
                 onClick={() => navigate('/agent-status')}
               />
               <ActionButton
@@ -1073,39 +1030,6 @@ export function DashboardPage() {
               </div>
             </div>
           </motion.section>
-
-          {/* 구분선 */}
-          <div className="border-border border-t" />
-
-          {/* 섹션: 최근 상태 로그 */}
-          <motion.section
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, delay: 0.2 }}
-          >
-            <p className="text-muted-foreground mb-3 text-xs font-medium tracking-wide uppercase">
-              최근 활동
-            </p>
-            <div className="border-border bg-card divide-border divide-y rounded-xl border">
-              {[
-                { message: '디바이스가 연결되었습니다.', dot: 'emerald', time: '방금 전' },
-                { message: '서버와의 연결이 정상입니다.', dot: 'emerald', time: '1분 전' },
-                { message: '에이전트가 대기 상태입니다.', dot: 'muted', time: '2분 전' },
-              ].map((log, i) => (
-                <div key={i} className="flex items-center justify-between px-4 py-3">
-                  <div className="flex items-center gap-2.5">
-                    <StatusDot color={log.dot as 'emerald' | 'muted'} />
-                    <span className="text-foreground text-sm">{log.message}</span>
-                  </div>
-                  <span className="text-muted-foreground shrink-0 text-xs">{log.time}</span>
-                </div>
-              ))}
-            </div>
-          </motion.section>
-        </div>
-
-        <div className="xl:sticky xl:top-[65px] xl:mt-[25px] xl:self-start">
-          <LlmTaskNotice />
         </div>
       </div>
 

@@ -82,14 +82,16 @@ public class DeviceDisplayStateRedisRepository {
         }
 
         List<String> taskRunIds = new ArrayList<>(activeTaskRunIds(userId));
-        taskRunIds.remove(payload.taskRunId());
 
         if (isTerminal(payload)) {
+            taskRunIds.remove(payload.taskRunId());
             saveActiveTaskRunIds(userId, taskRunIds);
             return;
         }
 
-        taskRunIds.add(payload.taskRunId());
+        if (!taskRunIds.contains(payload.taskRunId())) {
+            taskRunIds.add(payload.taskRunId());
+        }
         saveActiveTaskRunIds(userId, taskRunIds);
     }
 

@@ -19,7 +19,15 @@ class AgentLoopHandler:
         ),
     )
 
-    def __init__(self, provider: BaseProvider, prompt_manager, tool_runtime, tool_catalog, session_store=None) -> None:
+    def __init__(
+        self,
+        provider: BaseProvider,
+        prompt_manager,
+        tool_runtime,
+        tool_catalog,
+        session_store=None,
+        provider_registry=None,
+    ) -> None:
         from app.domain.orchestration.agent.tool_calling_loop import ToolCallingLoopHandler
 
         self.provider = provider
@@ -32,6 +40,7 @@ class AgentLoopHandler:
             tool_runtime=tool_runtime,
             tool_catalog=tool_catalog,
             session_store=session_store,
+            provider_registry=provider_registry,
         )
 
     def execute(self, *, task, step=None, resume_payload=None):

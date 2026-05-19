@@ -41,7 +41,9 @@ def classify_task_run_liveness(
         return RunLiveness("terminal", False, False, "terminal_status")
     if status in _WAITING_STATUSES:
         return RunLiveness("waiting", True, False, "waiting_for_input")
-    if status == TaskStatus.PENDING.value or queue_status in _QUEUED_QUEUE_STATUSES:
+    if queue_status in _QUEUED_QUEUE_STATUSES:
+        return RunLiveness("queued", True, False, "queued_for_worker")
+    if status == TaskStatus.PENDING.value and queue_status not in _CLAIMED_QUEUE_STATUSES:
         return RunLiveness("queued", True, False, "queued_for_worker")
     if status not in _ACTIVE_STATUSES:
         return RunLiveness("terminal", False, False, "inactive_status")
@@ -60,6 +62,9 @@ def classify_task_run_liveness(
         return RunLiveness("live", True, False, "heartbeat_recent")
 
     updated_at = _as_datetime(getattr(task, "updated_at", None))
+    claim_owner = str(getattr(task, "claim_owner", "") or "")
+    if queue_status in _CLAIMED_QUEUE_STATUSES and not claim_owner:
+        return RunLiveness("live", True, False, "direct_run_without_supervisor_claim")
     if queue_status in _CLAIMED_QUEUE_STATUSES or status == TaskStatus.RUNNING.value:
         if updated_at is None:
             return RunLiveness("orphaned", False, True, "claim_signal_missing")

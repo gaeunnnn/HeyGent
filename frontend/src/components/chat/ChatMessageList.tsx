@@ -14,6 +14,7 @@ type ChatMessageListProps = {
   taskRunSummariesById: Record<string, TaskRunSummaryView>
   onOpenTaskRun: (taskRunId: string) => void
   focusedTaskRunTarget?: { taskRunId: string; requestId: number }
+  assistantName?: string
 }
 
 export function ChatMessageList({
@@ -23,6 +24,7 @@ export function ChatMessageList({
   taskRunSummariesById,
   onOpenTaskRun,
   focusedTaskRunTarget,
+  assistantName,
 }: ChatMessageListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const bottomRef = useRef<HTMLDivElement | null>(null)
@@ -164,6 +166,7 @@ export function ChatMessageList({
                     : (stepRunsByTaskRunId[message.taskRunId] ?? [])
                 }
                 onOpenTaskRun={onOpenTaskRun}
+                assistantName={assistantName}
               />
             </div>
           ))}

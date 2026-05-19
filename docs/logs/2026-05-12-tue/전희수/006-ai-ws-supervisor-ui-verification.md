@@ -42,7 +42,7 @@
 
 ## 결정, 이슈, 리스크
 
-- `reference/paperclip-master`처럼 listener는 durable queue 등록만 하고 실행 소유권은 queue/supervisor가 갖는 방향으로 맞췄다.
+- listener는 durable queue 등록만 하고 실행 소유권은 queue/supervisor가 갖는 방향으로 맞췄다.
 - 서버 공용 OpenAI fallback key는 사용하지 않고 backend provider credential에서 사용자 API key를 발급받는 흐름을 기준으로 검증했다.
 - memory planner는 서버 공용 provider 미연결 상태에서 fallback 경고를 남기지만 채팅 완료는 막지 않았다.
 - 브릿지 코드는 수정하지 않았다.

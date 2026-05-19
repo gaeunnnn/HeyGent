@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 import asyncio
 import inspect
 import json
+import re
 from typing import Any, Literal
 
 from pydantic import Field
@@ -69,6 +70,9 @@ class AgentModelResponse(ContractModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     raw_response: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    progress_update: dict[str, Any] | None = None
+    work_disposition: dict[str, Any] | None = None
+    visible_text: str | None = None
 
 
 def coerce_agent_message(message: AgentMessage | ToolResultMessage | dict[str, Any]) -> AgentMessage:
@@ -170,6 +174,7 @@ def build_agent_model_response(
     """provider 원본 응답에서 agent.loop가 필요한 텍스트, tool call, 사용량 정보를 추출한다."""
 
     output_text = extract_responses_output_text(response_json)
+    response_contract = parse_assistant_response_contract(output_text)
     tool_calls = extract_responses_tool_calls(response_json)
     reasoning = extract_responses_reasoning(response_json)
     model = str(response_json.get("model") or requested_model)
@@ -177,13 +182,14 @@ def build_agent_model_response(
     usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else {}
     message = AgentMessage(
         role="assistant",
-        content=output_text,
+        content=response_contract.get("raw_text") or output_text,
         tool_calls=tool_calls,
         metadata={
             "response_id": response_json.get("id"),
             "model": model,
             "status": response_json.get("status"),
             "raw_metadata": response_json.get("metadata") if isinstance(response_json.get("metadata"), dict) else {},
+            "response_contract": response_contract.get("contract") or {},
         },
     )
     return AgentModelResponse(
@@ -196,14 +202,70 @@ def build_agent_model_response(
         reasoning=reasoning,
         usage=usage,
         raw_response=response_json,
+        progress_update=response_contract.get("progressUpdate"),
+        work_disposition=response_contract.get("workDisposition"),
+        visible_text=response_contract.get("text"),
         metadata={
             "response_id": response_json.get("id"),
             "model": model,
             "status": response_json.get("status"),
             "raw_metadata": response_json.get("metadata") if isinstance(response_json.get("metadata"), dict) else {},
+            "response_contract": response_contract.get("contract") or {},
             **(metadata or {}),
         },
     )
+
+
+def parse_assistant_response_contract(output_text: str) -> dict[str, Any]:
+    """assistant text envelope를 provider 공통 실행 metadata로 정규화한다.
+
+    모델은 최종 답변 본문과 진행 상태를 같은 assistant 응답으로만 돌려준다. runtime tool로
+    상태를 선언하지 않으므로 provider adapter 단계에서 `{text, progressUpdate, workDisposition}`
+    형태를 한 번 표준화해 loop가 provider별 JSON 모양을 몰라도 되게 한다.
+    """
+
+    raw_text = str(output_text or "")
+    parsed = _parse_json_object_from_text(raw_text)
+    if not isinstance(parsed, dict):
+        return {"text": raw_text, "raw_text": raw_text, "contract": {}}
+
+    contract_keys = {"text", "answer", "progressUpdate", "workDisposition"}
+    if not any(key in parsed for key in contract_keys):
+        return {"text": raw_text, "raw_text": raw_text, "contract": {}}
+
+    visible_text = parsed.get("text")
+    if not isinstance(visible_text, str):
+        visible_text = parsed.get("answer") if isinstance(parsed.get("answer"), str) else raw_text
+    progress_update = parsed.get("progressUpdate") if isinstance(parsed.get("progressUpdate"), dict) else None
+    work_disposition = parsed.get("workDisposition") if isinstance(parsed.get("workDisposition"), dict) else None
+    return {
+        "text": str(visible_text or "").strip(),
+        "raw_text": raw_text,
+        "progressUpdate": progress_update,
+        "workDisposition": work_disposition,
+        "contract": {
+            "progressUpdate": progress_update,
+            "workDisposition": work_disposition,
+        },
+    }
+
+
+def _parse_json_object_from_text(text: str) -> dict[str, Any] | None:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return None
+    candidates = [stripped]
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def extract_responses_output_text(response_json: dict[str, Any]) -> str:

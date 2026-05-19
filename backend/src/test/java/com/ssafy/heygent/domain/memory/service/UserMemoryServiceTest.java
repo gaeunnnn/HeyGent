@@ -27,6 +27,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import com.ssafy.heygent.domain.memory.dto.request.CreateMemoryRequest;
 import com.ssafy.heygent.domain.memory.dto.response.UserMemoryResponse;
 import com.ssafy.heygent.domain.memory.embedding.MemoryEmbeddingService;
+import com.ssafy.heygent.domain.memory.entity.MemoryOperationType;
 import com.ssafy.heygent.domain.memory.entity.MemoryScopeType;
 import com.ssafy.heygent.domain.memory.entity.MemoryStatus;
 import com.ssafy.heygent.domain.memory.entity.MemoryStoreType;
@@ -194,6 +195,58 @@ class UserMemoryServiceTest {
             .containsExactly(30L);
     }
 
+    @Test
+    void createCandidatesSkipsLaterUpdateWithSameTargetMemory() {
+        CreateMemoryRequest firstRequest = createUpdateRequest(10L, List.of(), "사용자는 점심으로 샐러드를 선호한다.");
+        CreateMemoryRequest secondRequest = createUpdateRequest(10L, List.of(), "사용자는 점심으로 생선을 선호한다.");
+        UserMemory targetMemory = preferenceMemory(10L, "사용자는 점심으로 고기를 선호한다.");
+        UserMemory savedMemory = preferenceMemory(100L, "사용자는 점심으로 샐러드를 선호한다.");
+
+        when(memoryEmbeddingService.embed(anyString())).thenReturn(List.of(1.0, 0.0));
+        when(userMemoryRepository.findById(10L)).thenReturn(Optional.of(targetMemory));
+        when(userMemoryRepository.save(any(UserMemory.class))).thenReturn(savedMemory);
+
+        List<UserMemoryResponse> responses = userMemoryService.createCandidates(
+            USER_ID,
+            List.of(firstRequest, secondRequest)
+        );
+
+        assertThat(responses)
+            .extracting(UserMemoryResponse::getId)
+            .containsExactly(100L);
+        assertThat(targetMemory.getStatus()).isEqualTo(MemoryStatus.INACTIVE);
+        verify(userMemoryRepository).findById(10L);
+        verify(userMemoryRepository).save(any(UserMemory.class));
+    }
+
+    @Test
+    void createCandidatesSkipsLaterUpdateOverlappingAdditionalTargetMemory() {
+        CreateMemoryRequest firstRequest = createUpdateRequest(10L, List.of(11L), "사용자는 점심으로 샐러드를 선호한다.");
+        CreateMemoryRequest secondRequest = createUpdateRequest(11L, List.of(), "사용자는 점심으로 생선을 선호한다.");
+        UserMemory primaryTargetMemory = preferenceMemory(10L, "사용자는 점심으로 고기를 선호한다.");
+        UserMemory additionalTargetMemory = preferenceMemory(11L, "사용자는 점심으로 든든한 고기 메뉴를 선호한다.");
+        UserMemory savedMemory = preferenceMemory(101L, "사용자는 점심으로 샐러드를 선호한다.");
+
+        when(memoryEmbeddingService.embed(anyString())).thenReturn(List.of(1.0, 0.0));
+        when(userMemoryRepository.findById(10L)).thenReturn(Optional.of(primaryTargetMemory));
+        when(userMemoryRepository.findById(11L)).thenReturn(Optional.of(additionalTargetMemory));
+        when(userMemoryRepository.save(any(UserMemory.class))).thenReturn(savedMemory);
+
+        List<UserMemoryResponse> responses = userMemoryService.createCandidates(
+            USER_ID,
+            List.of(firstRequest, secondRequest)
+        );
+
+        assertThat(responses)
+            .extracting(UserMemoryResponse::getId)
+            .containsExactly(101L);
+        assertThat(primaryTargetMemory.getStatus()).isEqualTo(MemoryStatus.INACTIVE);
+        assertThat(additionalTargetMemory.getStatus()).isEqualTo(MemoryStatus.INACTIVE);
+        verify(userMemoryRepository).findById(10L);
+        verify(userMemoryRepository).findById(11L);
+        verify(userMemoryRepository).save(any(UserMemory.class));
+    }
+
     private CreateMemoryRequest createRequest(MemoryType memoryType, MemoryScopeType scopeType) {
         CreateMemoryRequest request = new CreateMemoryRequest();
         ReflectionTestUtils.setField(request, "memoryType", memoryType);
@@ -203,6 +256,18 @@ class UserMemoryServiceTest {
         ReflectionTestUtils.setField(request, "metadata", Map.of());
         ReflectionTestUtils.setField(request, "importance", 0.8);
         ReflectionTestUtils.setField(request, "confidence", 0.9);
+        return request;
+    }
+
+    private CreateMemoryRequest createUpdateRequest(Long targetMemoryId, List<Long> additionalTargetMemoryIds, String content) {
+        CreateMemoryRequest request = createRequest(MemoryType.PREFERENCE, MemoryScopeType.GLOBAL);
+        ReflectionTestUtils.setField(request, "operationType", MemoryOperationType.UPDATE);
+        ReflectionTestUtils.setField(request, "storeType", MemoryStoreType.USER_PROFILE);
+        ReflectionTestUtils.setField(request, "targetMemoryId", targetMemoryId);
+        ReflectionTestUtils.setField(request, "additionalTargetMemoryIds", additionalTargetMemoryIds);
+        ReflectionTestUtils.setField(request, "content", content);
+        ReflectionTestUtils.setField(request, "summary", "점심 선호");
+        ReflectionTestUtils.setField(request, "updateReason", "사용자 발화 기준 선호 변경");
         return request;
     }
 
@@ -222,6 +287,26 @@ class UserMemoryServiceTest {
             .summary("짧은 회의록 요약 선호")
             .metadata(Map.of())
             .embeddingText(embeddingText)
+            .importance(0.8)
+            .confidence(0.9)
+            .status(MemoryStatus.ACTIVE)
+            .accessCount(0L)
+            .usedCount(0L)
+            .usefulnessScore(0.0)
+            .build();
+    }
+
+    private UserMemory preferenceMemory(Long id, String content) {
+        return UserMemory.builder()
+            .id(id)
+            .userId(USER_ID)
+            .storeType(MemoryStoreType.USER_PROFILE)
+            .memoryType(MemoryType.PREFERENCE)
+            .scopeType(MemoryScopeType.GLOBAL)
+            .content(content)
+            .summary("점심 선호")
+            .metadata(Map.of())
+            .embeddingText("[1.0,0.0]")
             .importance(0.8)
             .confidence(0.9)
             .status(MemoryStatus.ACTIVE)

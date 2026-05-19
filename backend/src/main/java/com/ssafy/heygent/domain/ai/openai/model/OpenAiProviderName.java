@@ -22,7 +22,7 @@ public enum OpenAiProviderName {
         "일반 GPT 모델을 사용합니다.",
         "api_key",
         List.of("openai_user_api_key"),
-        List.of("gpt-5.4", "gpt-5.4-mini")
+        List.of("gpt-5.4", "gpt-5.4-mini", "gpt-5.2")
     ),
     GEMINI_API_KEY(
         "gemini_api_key",
@@ -62,7 +62,7 @@ public enum OpenAiProviderName {
         "개발 환경에서 서버 API Key를 사용합니다.",
         "dev_fallback",
         List.of(),
-        List.of("gpt-5.4", "gpt-5.4-mini")
+        List.of("gpt-5.4", "gpt-5.4-mini", "gpt-5.2")
     );
 
     private final String value;

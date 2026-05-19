@@ -15,7 +15,7 @@ from app.domain.tasks.detail import merge_step_detail
 
 
 BLOCKED_WORKER_TOOLSETS = ("delegate", "delegation")
-DEFAULT_WORKER_TOOLSETS = ("skills", "terminal", "file", "web", "browser")
+DEFAULT_WORKER_TOOLSETS = ("skills", "terminal", "file", "web")
 DEFAULT_WORKER_MAX_ITERATIONS = 80
 DEFAULT_WORKER_HARD_TIMEOUT_SECONDS = 900
 
@@ -52,6 +52,7 @@ class DelegateRuntime:
                 "toolsets": normalized_contract["toolsets"],
                 "blocked_toolsets": normalized_contract["blocked_toolsets"],
                 "hard_timeout_seconds": normalized_contract["hard_timeout_seconds"],
+                **({"provider_name": normalized_contract["provider_name"]} if normalized_contract.get("provider_name") else {}),
             },
             worker_session_id=worker_session_id,
         )
@@ -344,6 +345,7 @@ class DelegateRuntime:
                     "blocked_toolsets": list(BLOCKED_WORKER_TOOLSETS),
                 },
                 "toolsets": contract["toolsets"],
+                **({"provider_name": contract["provider_name"]} if contract.get("provider_name") else {}),
             },
         )
         return worker_session_id
@@ -448,6 +450,14 @@ class DelegateRuntime:
         tasks = child_session.get("tasks", source_payload.get("tasks", []))
         if not isinstance(tasks, list):
             tasks = []
+        model = cls._optional_text(child_session.get("model", source_payload.get("model", profile_config.get("model"))))
+        provider_name = cls._worker_provider_name(
+            child_session=child_session,
+            source_payload=source_payload,
+            profile_config=profile_config,
+            profile=profile,
+            model=model,
+        )
 
         return {
             "goal": goal,
@@ -464,7 +474,8 @@ class DelegateRuntime:
             "profile_key": profile_key,
             "profile_version": profile_version,
             "agent_id": agent_id,
-            "model": cls._optional_text(child_session.get("model", source_payload.get("model", profile_config.get("model")))),
+            "model": model,
+            "provider_name": provider_name,
             "input_payload": source_payload,
             "parent_task_run_id": getattr(task, "task_run_id", None),
             "parent_step_run_id": getattr(step, "step_run_id", None),
@@ -511,6 +522,9 @@ class DelegateRuntime:
                 },
             }
         )
+        if contract.get("provider_name"):
+            payload["provider_name"] = contract["provider_name"]
+            payload["providerName"] = contract["provider_name"]
         return payload
 
     @classmethod
@@ -593,6 +607,44 @@ class DelegateRuntime:
             return None
         stripped = value.strip()
         return stripped or None
+
+    @classmethod
+    def _worker_provider_name(
+        cls,
+        *,
+        child_session: dict[str, Any],
+        source_payload: dict[str, Any],
+        profile_config: dict[str, Any],
+        profile: dict[str, Any] | None,
+        model: str | None,
+    ) -> str | None:
+        provider = (
+            cls._optional_text(child_session.get("provider_name"))
+            or cls._optional_text(child_session.get("providerName"))
+            or cls._optional_text(child_session.get("adapterType"))
+            or cls._optional_text(source_payload.get("provider_name"))
+            or cls._optional_text(source_payload.get("providerName"))
+            or cls._optional_text(source_payload.get("adapterType"))
+            or cls._optional_text(profile_config.get("provider_name"))
+            or cls._optional_text(profile_config.get("providerName"))
+            or cls._optional_text(profile_config.get("adapterType"))
+            or cls._optional_text((profile or {}).get("provider_name"))
+            or cls._optional_text((profile or {}).get("providerName"))
+        )
+        if provider:
+            return cls._normalize_provider_name(provider)
+        if model and model.strip().lower().startswith("gemini-"):
+            return "gemini_api_key"
+        return None
+
+    @staticmethod
+    def _normalize_provider_name(provider: str) -> str:
+        normalized = provider.strip().lower()
+        if normalized in {"gemini", "gemini_api", "gemini_api_key"}:
+            return "gemini_api_key"
+        if normalized in {"openai", "openai_api", "openai_api_key", "openai_user_api_key"}:
+            return "openai_api_key"
+        return provider
 
     @staticmethod
     def _duration_since(started_at: float) -> float:

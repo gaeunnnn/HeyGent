@@ -23,6 +23,11 @@ class ProjectingTaskRepository:
         self._save_task_snapshot(saved_task)
         return saved_task
 
+    def create_direct_task(self, task: TaskRun) -> TaskRun:
+        saved_task = self.durable_repository.create_direct_task(task)
+        self._save_task_snapshot(saved_task)
+        return saved_task
+
     def create_pending_task(self, task: TaskRun) -> TaskRun:
         saved_task = self.durable_repository.create_pending_task(task)
         self._save_task_snapshot(saved_task)

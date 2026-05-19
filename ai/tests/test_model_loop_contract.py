@@ -29,7 +29,7 @@ def test_prompt_builder_includes_native_tool_call_and_termination_guidance():
     assert "모델의 tool call 응답으로 반환하세요" in prompt
     assert "이미 충분한 정보가 있으면 더 이상 도구를 부르지 말고 일반 답변으로 종료하세요." in prompt
     assert "직전에 같은 도구를 같은 인자로 실행했다면 반복하지 말고 답변 종료를 우선하세요." in prompt
-    assert "사용자에게 보일 큰 작업 단계는 step 도구로 선언하고, 세부 체크리스트는 todo 도구로 갱신하세요." in prompt
+    assert "사용자에게 보일 현재 진행 상태는 assistant 응답의 progressUpdate로 갱신하고, 세부 체크리스트는 todo 도구로 갱신하세요." in prompt
     assert "사용자 요청 전체 또는 요청 안의 의미 있는 하위 작업이 다른 세션 에이전트의 skill 이름이나 설명과 맞고" in prompt
     assert "현재 실행 에이전트가 직접 답할 수 있더라도 위 조건을 만족하면 호출을 우선하세요." in prompt
     assert "session_agent_task 는 작업 보드에 보이는 하위 작업과 실제 세션 에이전트 실행을 묶는 도구입니다." in prompt
@@ -38,15 +38,18 @@ def test_prompt_builder_includes_native_tool_call_and_termination_guidance():
     assert "독립 산출물이나 책임 분리가 자연스러울 때 세션 에이전트 작업으로 분리하세요." in prompt
     assert "분리할 실익이 낮은 작업은 팀장이 직접 처리해도 됩니다." in prompt
     assert "수행할 수 있는 세션 에이전트가 없으면 임의로 배정하지 말고" in prompt
+    assert "세션 에이전트 후보의 skill 설명은 위임 판단용입니다." in prompt
+    assert "현재 실행 에이전트가 직접 보유한 skill이 아니면 `skills.read`로 읽지 마세요." in prompt
     assert "requiredSkillNames에 필요한 skill 이름을 담으세요." in prompt
     assert "폴더 경로 자체를 파일명으로 바꾸지 말고 폴더 안에 의미 있는 파일명을 만들어 저장하세요." in prompt
-    assert "근거/자료를 찾아 이해하는 단계와, 그 근거로 파일/문서/코드를 작성해 저장하는 단계는 서로 다른 단계입니다." in prompt
-    assert "앞 단계는 completed 로 닫고 뒤 단계를 in_progress 로 전환하세요." in prompt
-    assert "단계 이름은 반드시 대상/주제/산출물과 작업 행위를 함께 포함하세요." in prompt
+    assert "사용자가 자신의 이름, 호칭, 프로필, 선호, 비선호, 반복 행동, 작업 습관 같은 지속 정보를 알려주면" in prompt
+    assert "`progressUpdate`는 현재 StepRun에 표시할 진행 상태입니다." in prompt
+    assert "`progressUpdate.title`은 대상/주제/산출물과 작업 행위를 함께 포함하세요." in prompt
+    assert "작업을 끝낼 때 workId가 연결되어 있으면 `workDisposition`" in prompt
 
 
 def test_session_agent_task_parent_disposition_is_used_as_task_work_disposition():
-    disposition = ToolCallingLoopHandler._work_disposition_from_tool_results(
+    disposition = ToolCallingLoopHandler._parent_work_disposition_from_tool_results(
         [
             {
                 "name": "session_agent_task",
@@ -218,7 +221,7 @@ def test_prompt_builder_promotes_session_agent_task_from_candidate_profiles():
         },
         available_tools=[
             {"name": "session_agent_task", "summary": "세션 에이전트에게 하위 작업 위임", "toolset": "work"},
-            {"name": "web_search", "summary": "웹 검색", "toolset": "web"},
+            {"name": "http_get", "summary": "HTTP 조회", "toolset": "web"},
         ],
         tool_results=[],
         task_todo_state=None,
@@ -234,7 +237,7 @@ def test_prompt_builder_promotes_session_agent_task_from_candidate_profiles():
     assert "사용자 요청 전체 또는 요청 안의 의미 있는 하위 작업이 다른 세션 에이전트의 skill 이름이나 설명과 맞고" in prompt
     assert "그 에이전트가 해당 skill을 바탕으로 현재 실행 에이전트보다 더 적합하게 처리할 가능성이 있으면" in prompt
     assert "현재 실행 에이전트가 직접 답할 수 있더라도 위 조건을 만족하면 호출을 우선하세요." in prompt
-    assert "첫 tool-call 턴에서 step 도구로 현재 단계를 in_progress 로 선언한 뒤 session_agent_task" in prompt
+    assert "현재 응답의 progressUpdate에 세션 에이전트 실행 상태를 남긴 뒤 session_agent_task" in prompt
     assert "단순 응답, 맥락 정리, 최종 종합" in prompt
     assert "CEO가 직접" not in prompt
     assert "관점/영역별로 독립된 delegate_task" not in prompt
@@ -334,6 +337,34 @@ def test_work_context_prompt_deduplicates_shared_session_agent_skill_description
     assert "agent-general: 이름=기본 에이전트 / 스킬=subway-lost-property" in prompt
 
 
+def test_work_context_prompt_truncates_session_agent_skill_descriptions_for_routing():
+    prompt = build_work_context_prompt(
+        input_payload={
+            "sessionAgentProfiles": [
+                {
+                    "profileId": "agent-k",
+                    "configSnapshot": {"name": "K-에이전트", "skills": ["korea-weather"]},
+                    "skillDescriptions": [
+                        {
+                            "name": "korea-weather",
+                            "description": (
+                                "한국 날씨를 기상청 단기예보 조회서비스와 프록시 경유로 조회해 요약하고, "
+                                "지역 좌표와 날짜 기준을 바탕으로 사용자가 바로 이해할 수 있게 설명한다."
+                            ),
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert (
+        "korea-weather: 한국 날씨를 기상청 단기예보 조회서비스와 프록시 경유로 조회해 요약하고, "
+        "지역 좌표와 날짜 기준을 바탕으로 사용자가 바로 이해할 수 있게..."
+    ) in prompt
+    assert "설명한다" not in prompt
+
+
 def test_persistent_memory_prompt_sanitizes_metadata():
     prompt = build_persistent_memory_prompt(
         [
@@ -404,7 +435,7 @@ def test_prompt_builder_includes_skill_description_catalog_without_reader_tool_p
     prompt = prompt_builder.build_agent_loop_prompt(
         input_payload={"prompt": "강남구 날씨 알려줘"},
         available_tools=[
-            {"name": "web_search", "summary": "웹 검색", "toolset": "web"},
+            {"name": "http_get", "summary": "HTTP 조회", "toolset": "web"},
         ],
         tool_results=[],
         task_todo_state=None,
@@ -415,8 +446,10 @@ def test_prompt_builder_includes_skill_description_catalog_without_reader_tool_p
 
     assert "사용 가능한 skill 설명" in prompt
     assert "현재 실행 에이전트가 직접 사용할 수 있는 skill의 이름과 설명입니다." in prompt
+    assert "작업을 시작할 때 먼저 아래 목록에서 사용자 요청을 처리할 수 있는 skill 후보가 있는지 확인하세요." in prompt
     assert "세션 에이전트 후보가 더 직접적으로 맞으면 이 목록에 억지로 맞추지 말고 세션 에이전트 배정을 검토하세요." in prompt
-    assert "사용자 입력을 직접 수행할 수 있는 skill이 있으면 해당 skill을 활용하는 방향으로 진행하세요." in prompt
+    assert "사용자 입력을 직접 수행할 수 있는 skill이 있으면 일반 도구를 바로 호출하기보다 해당 skill을 최대한 우선 후보로 삼으세요." in prompt
+    assert "관련 skill 후보를 선택했다면 `skills.read` 또는 `skill.execute`로 본문을 먼저 확인한 뒤" in prompt
     assert "전혀 관련 있는 skill이 없을 때만 skill 없이 진행하고, skill 본문에 제한이나 우선 절차가 있으면 그 절차를 우선하세요." in prompt
     assert "skills.read" in prompt
     assert "skills.read_file" not in prompt
@@ -496,7 +529,59 @@ def test_prompt_builder_filters_skill_catalog_by_enabled_skill_names():
     assert "`zipcode-search`" not in prompt
 
 
-def test_assemble_agent_loop_messages_preserves_history_as_native_messages():
+def test_skill_catalog_filters_optional_tool_conditions_like_reference():
+    registry = SkillRegistry()
+    registry.register_many(
+        [
+            {"name": "general-note", "description": "도구 전제가 없는 일반 지침"},
+            {
+                "name": "browser-only",
+                "description": "브라우저가 있을 때만 보여야 하는 스킬",
+                "metadata": {"runtime": {"requires_tools": ["browser_navigate"]}},
+            },
+            {
+                "name": "web-search-fallback",
+                "description": "removed_search가 없을 때만 보여야 하는 대체 검색 스킬",
+                "metadata": {"runtime": {"requires_toolsets": ["terminal"], "fallback_for_tools": ["removed_search"]}},
+            },
+        ]
+    )
+    prompt_builder = PromptBuilder(SkillPromptBuilder(registry))
+
+    prompt_without_removed_search = prompt_builder.build_agent_loop_prompt(
+        input_payload={"prompt": "검색해줘"},
+        available_tools=[
+            {"name": "terminal.run", "summary": "터미널 실행", "toolset": "terminal"},
+            {"name": "http_get", "summary": "HTTP 조회", "toolset": "web"},
+        ],
+        tool_results=[],
+        task_todo_state=None,
+        resume_payload=None,
+        turn_index=1,
+        max_iterations=4,
+    )
+    prompt_with_removed_search = prompt_builder.build_agent_loop_prompt(
+        input_payload={"prompt": "검색해줘"},
+        available_tools=[
+            {"name": "terminal.run", "summary": "터미널 실행", "toolset": "terminal"},
+            {"name": "removed_search", "summary": "제거 예정 검색", "toolset": "web"},
+        ],
+        tool_results=[],
+        task_todo_state=None,
+        resume_payload=None,
+        turn_index=1,
+        max_iterations=4,
+    )
+
+    assert "`general-note`" in prompt_without_removed_search
+    assert "`web-search-fallback`" in prompt_without_removed_search
+    assert "`browser-only`" not in prompt_without_removed_search
+    assert "`general-note`" in prompt_with_removed_search
+    assert "`web-search-fallback`" not in prompt_with_removed_search
+    assert "`browser-only`" not in prompt_with_removed_search
+
+
+def test_assemble_agent_loop_messages_wraps_history_as_context_only():
     messages = assemble_agent_loop_messages(
         system_prompt_snapshot="고정 system prompt",
         conversation_history=[
@@ -507,12 +592,16 @@ def test_assemble_agent_loop_messages_preserves_history_as_native_messages():
         runtime_prompt_suffix="도구 사용 지침",
     )
 
-    assert [message.role for message in messages] == ["system", "user", "assistant", "user"]
+    assert [message.role for message in messages] == ["system", "user"]
     assert messages[0].content == "고정 system prompt"
-    assert messages[1].content == "이전 요청"
-    assert messages[2].content == "이전 답변"
-    assert "지금 질문" in str(messages[3].content)
-    assert "도구 사용 지침" in str(messages[3].content)
+    assert "참고 맥락" in str(messages[1].content)
+    assert "과거 사용자 요청을 다시 실행하지 마세요" in str(messages[1].content)
+    assert "[1] user: 이전 요청" in str(messages[1].content)
+    assert "[2] assistant: 이전 답변" in str(messages[1].content)
+    assert "<current_turn>" in str(messages[1].content)
+    assert "지금 질문" in str(messages[1].content)
+    assert "도구 사용 지침" in str(messages[1].content)
+    assert str(messages[1].content).rfind("<conversation_history>") < str(messages[1].content).rfind("<current_turn>")
 
 
 def test_single_prompt_fallback_is_the_only_history_text_renderer():
@@ -534,11 +623,9 @@ def test_builtin_browser_web_skills_are_loaded_from_app_skills():
     loaded = {skill["name"]: skill for skill in SkillLoader().load_builtin()}
 
     for name in {
-        "web-search-fallback",
         "web-scraping",
         "academic-paper-search",
         "domain-intelligence",
-        "ux-flow-review",
     }:
         assert name in loaded
         assert "Hermes" not in loaded[name]["body"]

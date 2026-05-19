@@ -69,6 +69,11 @@ interface UIState {
   taskActivityPanelOpen: boolean
   setTaskActivityPanelOpen: (open: boolean) => void
 
+  // 프로토타입 프리뷰 패널
+  prototypePanelSessionId: string | null
+  prototypePanelOpenRequest: number
+  requestPrototypePanel: (sessionId: string) => void
+
   // 테마
   theme: 'dark' | 'light'
   setTheme: (theme: 'dark' | 'light') => void
@@ -95,6 +100,13 @@ export const useUIStore = create<UIState>()(
         }),
       taskActivityPanelOpen: false,
       setTaskActivityPanelOpen: (open) => set({ taskActivityPanelOpen: open }),
+      prototypePanelSessionId: null,
+      prototypePanelOpenRequest: 0,
+      requestPrototypePanel: (sessionId) =>
+        set((state) => ({
+          prototypePanelSessionId: sessionId,
+          prototypePanelOpenRequest: state.prototypePanelOpenRequest + 1,
+        })),
       theme: 'dark',
       setTheme: (theme) => {
         document.documentElement.classList.toggle('dark', theme === 'dark')

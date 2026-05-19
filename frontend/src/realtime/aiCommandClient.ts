@@ -36,7 +36,7 @@ type PendingCommand = {
   type: AiRealtimeCommandType
   resolve: (value: unknown) => void
   reject: (reason: unknown) => void
-  timeoutId: ReturnType<typeof window.setTimeout>
+  timeoutId: number
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000

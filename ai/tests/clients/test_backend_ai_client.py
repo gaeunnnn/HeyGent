@@ -51,6 +51,48 @@ async def test_issue_credential_sends_internal_token_and_caches_by_user_provider
 
 
 @pytest.mark.asyncio
+async def test_invalidate_credential_cache_removes_matching_user_provider_entries():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        provider_name = json.loads(request.read().decode())["providerName"]
+        return httpx.Response(
+            200,
+            json={
+                "status": 200,
+                "message": "ok",
+                "data": {
+                    "providerName": provider_name,
+                    "authType": "api_key",
+                    "model": "gpt-5.4",
+                    "credentialType": "api_key",
+                    "credential": f"credential-{len(calls)}",
+                    "expiresAt": None,
+                },
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = BackendAiClient(
+        settings=Settings(
+            backend_base_url="http://backend",
+            internal_service_token="service-token",
+        ),
+        http_client=http_client,
+    )
+
+    first = await client.issue_credential(user_id="10", provider_name="openai_api_key", model="gpt-5.4")
+    removed = client.invalidate_credential_cache(user_id=10, provider_name="openai_api_key")
+    second = await client.issue_credential(user_id="10", provider_name="openai_api_key", model="gpt-5.4")
+
+    assert removed == 1
+    assert first.credential == "credential-1"
+    assert second.credential == "credential-2"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_record_command_usage_maps_openai_usage_and_session_context():
     captured: dict = {}
 

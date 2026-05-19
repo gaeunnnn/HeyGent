@@ -164,6 +164,9 @@ function ChildWorkForm({ onSubmit }: { onSubmit: (title: string, description: st
         className="bg-background mt-2 min-h-16 w-full resize-none rounded border px-2 py-1.5 text-xs outline-none focus:ring-1"
       />
       <div className="mt-2 flex justify-end gap-1">
+        <Button type="button" size="sm" className="h-8" onClick={submit}>
+          추가
+        </Button>
         <Button
           type="button"
           variant="ghost"
@@ -172,9 +175,6 @@ function ChildWorkForm({ onSubmit }: { onSubmit: (title: string, description: st
           onClick={() => setOpen(false)}
         >
           취소
-        </Button>
-        <Button type="button" size="sm" className="h-8" onClick={submit}>
-          추가
         </Button>
       </div>
     </div>

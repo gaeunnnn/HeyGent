@@ -1,6 +1,7 @@
 package com.ssafy.heygent.domain.memory.service;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -147,10 +148,26 @@ public class UserMemoryService {
 
     @Transactional
     public List<UserMemoryResponse> createCandidates(Long userId, List<CreateMemoryRequest> candidates) {
-        return candidates.stream()
-            .filter(candidate -> isStorableScore(candidate.getImportance(), candidate.getConfidence()))
-            .map(candidate -> create(userId, candidate))
-            .toList();
+        List<UserMemoryResponse> responses = new ArrayList<>();
+        Set<Long> touchedTargetMemoryIds = new LinkedHashSet<>();
+
+        for (CreateMemoryRequest candidate : candidates) {
+            if (!isStorableScore(candidate.getImportance(), candidate.getConfidence())) {
+                continue;
+            }
+
+            Set<Long> candidateTargetMemoryIds = targetChangingMemoryIds(candidate);
+            if (!candidateTargetMemoryIds.isEmpty()
+                && intersects(touchedTargetMemoryIds, candidateTargetMemoryIds)) {
+                continue;
+            }
+
+            UserMemoryResponse response = create(userId, candidate);
+            responses.add(response);
+            touchedTargetMemoryIds.addAll(candidateTargetMemoryIds);
+        }
+
+        return responses;
     }
 
     private UserMemoryResponse saveMemory(
@@ -591,6 +608,31 @@ public class UserMemoryService {
         if (memory.getStatus() == MemoryStatus.DELETED || memory.getStatus() == MemoryStatus.INACTIVE) {
             throw new CustomException(ErrorCode.RESOURCE_NOT_FOUND);
         }
+    }
+
+    private Set<Long> targetChangingMemoryIds(CreateMemoryRequest request) {
+        MemoryOperationType operationType = resolveOperationType(request.getOperationType());
+        if (operationType != MemoryOperationType.UPDATE
+            && operationType != MemoryOperationType.MERGE
+            && operationType != MemoryOperationType.INVALIDATE) {
+            return Set.of();
+        }
+
+        LinkedHashSet<Long> targetMemoryIds = new LinkedHashSet<>();
+        if (request.getTargetMemoryId() != null) {
+            targetMemoryIds.add(request.getTargetMemoryId());
+        }
+        List<Long> additionalTargetMemoryIds = request.getAdditionalTargetMemoryIds();
+        if (additionalTargetMemoryIds != null) {
+            additionalTargetMemoryIds.stream()
+                .filter(Objects::nonNull)
+                .forEach(targetMemoryIds::add);
+        }
+        return targetMemoryIds;
+    }
+
+    private boolean intersects(Set<Long> left, Set<Long> right) {
+        return right.stream().anyMatch(left::contains);
     }
 
     private void validateMemoryScore(Double importance, Double confidence) {

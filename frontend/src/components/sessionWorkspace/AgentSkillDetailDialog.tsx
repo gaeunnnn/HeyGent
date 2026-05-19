@@ -48,7 +48,7 @@ export function AgentSkillDetailDialog({
       <DialogContent className="max-h-[86vh] max-w-5xl overflow-hidden p-0">
         <DialogHeader className="border-border border-b px-5 py-4">
           <DialogTitle>{detail?.displayName ?? '스킬 상세'}</DialogTitle>
-          <DialogDescription className="line-clamp-2">
+          <DialogDescription className="line-clamp-3">
             {detail?.description ?? '스킬 문서를 확인합니다.'}
           </DialogDescription>
         </DialogHeader>

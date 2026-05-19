@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from app.core.utils.ids import new_id
-from app.domain.work import WorkComment, WorkService
+from app.domain.work import WorkComment, WorkRunClaimConflict, WorkService
 from app.domain.session.sessions.transcript_store import TranscriptStore
-from app.tools.runtime.registry import build_runtime_tool_entries, list_runtime_tool_definitions
+from app.tools.runtime.registry import (
+    build_runtime_tool_entries,
+    list_runtime_tool_availability,
+    list_runtime_tool_definitions,
+)
+from app.tools.runtime.tool_result_tool import tool_result_read_handler
 from app.tools.runtime.toolsets import resolve_runtime_tool_names
 
 
@@ -19,8 +26,6 @@ FILE_TOOL_NAMES = {"read_file", "write_file", "patch", "search_files"}
 # 분기 자리는 한 곳뿐이라 호출자(tool_calling_loop, transcript 기록)는 결과 dict가 같으면 변경을 인지할 필요 없음.
 BRIDGE_ROUTABLE_TOOLS = {"terminal.run", "read_file", "write_file", "patch", "search_files"}
 MAX_TERMINAL_STREAM_CHARS = 12_000
-MAX_TOOL_RESULT_STRING_CHARS = 20_000
-MAX_TOOL_RESULT_TRUNCATED_FIELDS = 20
 MAX_SKILL_RESOURCE_BYTES = 200_000
 SECRET_FILE_NAME_PATTERN = re.compile(
     r"(^|[._-])(secret|secrets|token|password|passwd|credential|credentials|env)($|[._-])",
@@ -44,6 +49,7 @@ class LocalToolRuntime:
         owner_key: str | None = None,
         work_repository=None,
         agent_repository=None,
+        prototype_repository=None,
         runtime_context: dict[str, Any] | None = None,
     ) -> None:
         self.skill_registry = skill_registry
@@ -52,9 +58,9 @@ class LocalToolRuntime:
         self.owner_key = str(owner_key) if owner_key else None
         self.work_repository = work_repository
         self.agent_repository = agent_repository
+        self.prototype_repository = prototype_repository
         self.runtime_context = dict(runtime_context or {})
         self.workspace_root = self._resolve_workspace_root(workspace_root)
-        self._step_items: list[dict[str, str]] = []
         self._todo_items: list[dict[str, str]] = []
         self._tool_entries = build_runtime_tool_entries(
             {
@@ -62,31 +68,22 @@ class LocalToolRuntime:
                 "skills.read": self._read_skill,
                 "skills.read_file": self._read_skill_file,
                 "skill.execute": self._execute_skill,
+                "skill.run_script": self._run_skill_script,
                 "session.record": self._record_session_message,
                 "session.search": self._search_sessions,
-                "step": self._step,
                 "todo": self._todo,
                 "delegate_task": self._delegate_task,
                 "session_agent_task": self._session_agent_task,
-                "work_disposition": self._work_disposition,
                 "mattermost.send": self._send_mattermost_message,
                 "notion.execute": self._execute_notion,
+                "gmail.execute": self._execute_gmail,
+                "design.list_presets": self._list_design_presets,
+                "design.read_preset": self._read_design_preset,
+                "prototype.get_active_artifact": self._get_active_prototype_artifact,
+                "prototype.create_artifact": self._create_prototype_artifact,
+                "tool_result.read": self._read_tool_result,
                 "terminal.run": self._run_terminal_command,
-                "web_search": self._run_web_search,
-                "web_extract": self._run_web_extract,
-                "web_crawl": self._run_web_crawl,
                 "http_get": self._run_http_get,
-                "browser_navigate": self._run_browser_navigate,
-                "browser_snapshot": self._run_browser_snapshot,
-                "browser_click": self._run_browser_click,
-                "browser_type": self._run_browser_type,
-                "browser_scroll": self._run_browser_scroll,
-                "browser_back": self._run_browser_back,
-                "browser_press": self._run_browser_press,
-                "browser_get_images": self._run_browser_get_images,
-                "browser_vision": self._run_browser_vision,
-                "browser_console": self._run_browser_console,
-                "browser_cdp": self._run_browser_cdp,
                 "read_file": self._read_file,
                 "write_file": self._write_file,
                 "patch": self._patch_file,
@@ -103,6 +100,15 @@ class LocalToolRuntime:
             return definitions
         return [item for item in definitions if item["name"] in allowed_tool_names]
 
+    def list_tool_availability(self, *, enabled_toolsets: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        availability = list_runtime_tool_availability(
+            {name: entry.handler for name, entry in self._tool_entries.items()}
+        )
+        allowed_tool_names = resolve_runtime_tool_names(enabled_toolsets)
+        if allowed_tool_names is None:
+            return availability
+        return [item for item in availability if item["name"] in allowed_tool_names]
+
     def bind_workspace_root(self, workspace_root: str | os.PathLike[str] | None) -> "LocalToolRuntime":
         if workspace_root is None or str(workspace_root).strip() == "":
             return self
@@ -115,9 +121,9 @@ class LocalToolRuntime:
             owner_key=self.owner_key,
             work_repository=self.work_repository,
             agent_repository=self.agent_repository,
+            prototype_repository=self.prototype_repository,
             runtime_context=self.runtime_context,
         )
-        bound._step_items = [dict(item) for item in self._step_items]
         bound._todo_items = [dict(item) for item in self._todo_items]
         return bound
 
@@ -136,9 +142,9 @@ class LocalToolRuntime:
             owner_key=owner_key or self.owner_key,
             work_repository=self.work_repository,
             agent_repository=self.agent_repository,
+            prototype_repository=self.prototype_repository,
             runtime_context=runtime_context if runtime_context is not None else self.runtime_context,
         )
-        bound._step_items = [dict(item) for item in self._step_items]
         bound._todo_items = [dict(item) for item in self._todo_items]
         return bound
 
@@ -204,7 +210,7 @@ class LocalToolRuntime:
         if normalized_name in BRIDGE_ROUTABLE_TOOLS and self.bridge_session_manager is not None:
             bridge_result = self._maybe_route_via_bridge(tool_name=normalized_name, args=trusted_args)
             if bridge_result is not None:
-                return self._cap_tool_result(bridge_result)
+                return bridge_result
 
         try:
             result = entry.handler(trusted_args)
@@ -215,7 +221,7 @@ class LocalToolRuntime:
                 message=f"{type(error).__name__}: {error}",
                 tool_name=normalized_name,
             )
-        return self._cap_tool_result(result)
+        return result
 
     def require_call(self, *, name: str, args: dict[str, Any]) -> dict[str, Any]:
         entry = self._tool_entries.get(name)
@@ -386,6 +392,129 @@ class LocalToolRuntime:
             "content": str(skill.get("body") or ""),
         }
 
+    def _run_skill_script(self, args: dict[str, Any]) -> dict[str, object]:
+        skill_name = str(args.get("skill_name") or "").strip()
+        if not self._is_runtime_skill_enabled(skill_name):
+            return self._tool_error(
+                code="skill_disabled",
+                message=f"disabled skill: {skill_name}",
+                tool_name="skill.run_script",
+            )
+
+        skill = getattr(self.skill_registry, "_skills", {}).get(skill_name)
+        if skill is None:
+            return self._tool_error(
+                code="skill_not_found",
+                message=f"unknown skill: {skill_name}",
+                tool_name="skill.run_script",
+            )
+
+        document_path = self._resolve_skill_document_path(skill.get("path"))
+        if document_path is None or not self._is_allowed_skill_path(document_path):
+            return self._tool_error(
+                code="skill_path_not_allowed",
+                message="skill document path must stay inside app/skills",
+                tool_name="skill.run_script",
+            )
+
+        script_path = self._resolve_skill_resource_path(document_path, args.get("script_path"))
+        skill_dir = document_path.parent.resolve(strict=False)
+        scripts_dir = (skill_dir / "scripts").resolve(strict=False)
+        if (
+            script_path is None
+            or not self._is_relative_to(script_path, scripts_dir)
+            or script_path.suffix != ".py"
+        ):
+            return self._tool_error(
+                code="skill_script_not_allowed",
+                message="skill script path must be a Python file inside the selected skill's scripts directory",
+                tool_name="skill.run_script",
+            )
+        if not script_path.exists() or not script_path.is_file():
+            return self._tool_error(
+                code="skill_script_not_found",
+                message="skill script not found",
+                tool_name="skill.run_script",
+            )
+
+        env = os.environ.copy()
+        injected_secret_keys: list[str] = []
+        secret_values = self._agent_secret_env_for_skill(skill_name)
+        for key, value in secret_values.items():
+            env[key] = value
+            injected_secret_keys.append(key)
+
+        required_secret_keys = self._string_list(args.get("required_secret_keys"))
+        missing_secret_keys = [key for key in required_secret_keys if not env.get(key)]
+        if missing_secret_keys:
+            error_payload = self._tool_error(
+                code="missing_skill_secrets",
+                message="required skill secrets are not saved",
+                tool_name="skill.run_script",
+                details={"missing_secret_keys": missing_secret_keys},
+            )
+            error_payload["missing_secret_keys"] = missing_secret_keys
+            return error_payload
+
+        argv = [sys.executable, str(script_path), *self._string_list(args.get("argv"))]
+        timeout_seconds = float(args.get("timeout_seconds") or 30.0)
+        completed = subprocess.run(
+            argv,
+            cwd=str(skill_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        stdout, stdout_truncated = self._truncate_terminal_stream("stdout", completed.stdout)
+        stderr, stderr_truncated = self._truncate_terminal_stream("stderr", completed.stderr)
+        return {
+            "ok": completed.returncode == 0,
+            "skill_name": skill_name,
+            "script_path": script_path.relative_to(skill_dir).as_posix(),
+            "returncode": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "injected_secret_keys": sorted(injected_secret_keys),
+        }
+
+    def _agent_secret_env_for_skill(self, skill_name: str) -> dict[str, str]:
+        profile_id = self._runtime_agent_profile_id()
+        if not profile_id or not self.owner_key or self.agent_repository is None:
+            return {}
+        getter = getattr(self.agent_repository, "get_agent_secret_values", None)
+        if not callable(getter):
+            return {}
+        values = getter(
+            profile_id=profile_id,
+            owner_key=self.owner_key,
+            document_key="SECRETS.md",
+            section_key=skill_name,
+        )
+        if not isinstance(values, dict):
+            return {}
+        section_values = values.get(skill_name)
+        if not isinstance(section_values, dict):
+            return {}
+        return {
+            str(key).strip(): str(value)
+            for key, value in section_values.items()
+            if str(key).strip() and str(value)
+        }
+
+    def _runtime_agent_profile_id(self) -> str | None:
+        for key in ("agentProfileId", "agent_profile_id", "workAssigneeAgentId", "work_assignee_agent_id"):
+            value = self._optional_text(self.runtime_context.get(key))
+            if value:
+                return value
+        profile = self.runtime_context.get("targetAgentProfile")
+        if isinstance(profile, dict):
+            return self._optional_text(profile.get("profileId") or profile.get("profile_id"))
+        return None
+
     def _runtime_skills(self) -> dict[str, Any]:
         skills = getattr(self.skill_registry, "_skills", {})
         allowed = self._runtime_enabled_skill_names()
@@ -457,13 +586,6 @@ class LocalToolRuntime:
             "summary": self._todo_summary(self._todo_items),
         }
 
-    def _step(self, args: dict[str, Any]) -> dict[str, object]:
-        self._step_items = self._write_steps(list(args.get("steps") or []), merge=bool(args.get("merge", False)))
-        return {
-            "steps": [dict(item) for item in self._step_items],
-            "summary": self._todo_summary(self._step_items),
-        }
-
     def _read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_file_tool_handler("read_file_handler", args)
 
@@ -476,17 +598,11 @@ class LocalToolRuntime:
     def _search_files(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_file_tool_handler("search_files_handler", args)
 
-    def _run_web_search(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.web.web_tools", "web_search_handler", args)
-
-    def _run_web_extract(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.web.web_tools", "web_extract_handler", args)
-
-    def _run_web_crawl(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.web.web_tools", "web_crawl_handler", args)
-
     def _run_http_get(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_external_tool_handler("app.tools.web.web_tools", "http_get_handler", args)
+
+    def _read_tool_result(self, args: dict[str, Any]) -> dict[str, Any]:
+        return tool_result_read_handler(args)
 
     def _send_mattermost_message(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._run_external_tool_handler(
@@ -502,38 +618,167 @@ class LocalToolRuntime:
             args,
         )
 
-    def _run_browser_navigate(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_navigate_handler", args)
+    def _execute_gmail(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._run_external_tool_handler(
+            "app.tools.gmail.gmail_tool",
+            "execute_gmail_handler",
+            args,
+        )
 
-    def _run_browser_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_snapshot_handler", args)
+    def _list_design_presets(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._run_external_tool_handler(
+            "app.tools.design.design_tool",
+            "list_design_presets_handler",
+            args,
+        )
 
-    def _run_browser_click(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_click_handler", args)
+    def _read_design_preset(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._run_external_tool_handler(
+            "app.tools.design.design_tool",
+            "read_design_preset_handler",
+            args,
+        )
 
-    def _run_browser_type(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_type_handler", args)
+    def _create_prototype_artifact(self, args: dict[str, Any]) -> dict[str, Any]:
+        from app.tools.prototype.prototype_tool import normalize_prototype_files, prototype_tool_error
+        from app.tools.prototype.prototype_validation import (
+            validate_prototype_preview_files,
+            validation_issues_payload,
+        )
 
-    def _run_browser_scroll(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_scroll_handler", args)
+        if self.prototype_repository is None:
+            return prototype_tool_error("prototype_repository_unavailable", "prototype artifact storage is not configured.")
 
-    def _run_browser_back(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_back_handler", args)
+        session_id = self._optional_text(
+            args.get("_trusted_session_id")
+            or self.runtime_context.get("sessionId")
+            or self.runtime_context.get("session_id")
+        )
+        owner_key = self._optional_text(args.get("_trusted_owner_key") or self.owner_key)
+        if not session_id or not owner_key:
+            return prototype_tool_error(
+                "prototype_context_required",
+                "prototype artifact creation requires a bound session and owner.",
+            )
 
-    def _run_browser_press(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_press_handler", args)
+        files = normalize_prototype_files(args.get("files"))
+        if not files:
+            return prototype_tool_error("prototype_files_required", "prototype files are required.")
 
-    def _run_browser_get_images(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_get_images_handler", args)
+        title = self._optional_text(args.get("title")) or "프로토타입"
+        framework = self._optional_text(args.get("framework")) or "react"
+        styling = self._optional_text(args.get("styling")) or "css"
+        entry_file = self._optional_text(args.get("entryFile") or args.get("entry_file")) or _default_entry_file(files)
+        design_preset_id = self._optional_text(args.get("designPresetId") or args.get("design_preset_id"))
+        if not design_preset_id:
+            active_record = self.prototype_repository.get_active_artifact(session_id=session_id, owner_key=owner_key)
+            if active_record is not None:
+                design_preset_id = self._optional_text(active_record.get("design_preset_id"))
+        if not design_preset_id:
+            return prototype_tool_error(
+                "design_preset_required",
+                "DESIGN.md prototype creation requires designPresetId. Call design.list_presets, "
+                "read one preset with design.read_preset, then retry with that exact preset_id.",
+            )
+        validation_issues = validate_prototype_preview_files(files, entry_file=entry_file, framework=framework)
+        if validation_issues:
+            issues_payload = validation_issues_payload(validation_issues)
+            issue_summary = "; ".join(issue["message"] for issue in issues_payload[:3])
+            return prototype_tool_error(
+                "prototype_validation_failed",
+                "Prototype preview validation failed before saving. Fix the files and call "
+                f"prototype.create_artifact again. {issue_summary}",
+                details={"issues": issues_payload},
+            )
+        summary = self._optional_text(args.get("summary")) or "프로토타입 버전을 생성했습니다."
+        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+        task_run_id = self._optional_text(self.runtime_context.get("taskRunId") or self.runtime_context.get("task_run_id"))
+        prompt_message_id = self._optional_text(
+            self.runtime_context.get("promptMessageId") or self.runtime_context.get("prompt_message_id")
+        )
 
-    def _run_browser_vision(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_vision_handler", args)
+        saved = self.prototype_repository.create_artifact_version(
+            session_id=session_id,
+            owner_key=owner_key,
+            title=title,
+            framework=framework,
+            styling=styling,
+            design_preset_id=design_preset_id,
+            entry_file=entry_file,
+            files=files,
+            summary=summary,
+            task_run_id=task_run_id,
+            prompt_message_id=prompt_message_id,
+            metadata=metadata,
+        )
+        return {
+            "ok": True,
+            "activeArtifactId": saved["artifact_id"],
+            "activeArtifactVersionId": saved["version_id"],
+            "artifactId": saved["artifact_id"],
+            "versionId": saved["version_id"],
+            "versionNumber": saved["version_number"],
+            "framework": saved["framework"],
+            "styling": saved["styling"],
+            "designPresetId": saved.get("design_preset_id"),
+            "entryFile": saved["entry_file"],
+            "previewMode": "sandpack" if saved["framework"] == "react" else "iframe",
+            "fileCount": len(saved["files"]),
+            "summary": saved.get("summary") or "",
+        }
 
-    def _run_browser_console(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_console_handler", args)
+    def _get_active_prototype_artifact(self, args: dict[str, Any]) -> dict[str, Any]:
+        from app.tools.prototype.prototype_tool import prototype_tool_error
 
-    def _run_browser_cdp(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._run_external_tool_handler("app.tools.browser.browser_tool", "browser_cdp_handler", args)
+        _ = args
+        if self.prototype_repository is None:
+            return prototype_tool_error("prototype_repository_unavailable", "prototype artifact storage is not configured.")
+
+        session_id = self._optional_text(
+            self.runtime_context.get("sessionId") or self.runtime_context.get("session_id")
+        )
+        owner_key = self._optional_text(self.owner_key)
+        if not session_id or not owner_key:
+            return prototype_tool_error(
+                "prototype_context_required",
+                "prototype artifact lookup requires a bound session and owner.",
+            )
+
+        record = self.prototype_repository.get_active_artifact(session_id=session_id, owner_key=owner_key)
+        if record is None:
+            return {
+                "ok": True,
+                "artifact": None,
+                "content": json.dumps({"ok": True, "artifact": None}, ensure_ascii=False),
+            }
+
+        artifact = {
+            "artifactId": str(record["artifact_id"]),
+            "versionId": str(record["version_id"]),
+            "sessionId": str(record["session_id"]),
+            "title": str(record.get("title") or "프로토타입"),
+            "framework": str(record.get("framework") or "react"),
+            "styling": str(record.get("styling") or "css"),
+            "designPresetId": record.get("design_preset_id"),
+            "entryFile": str(record.get("entry_file") or "/src/App.tsx"),
+            "versionNumber": int(record.get("version_number") or 1),
+            "summary": str(record.get("summary") or ""),
+            "files": record.get("files") if isinstance(record.get("files"), dict) else {},
+        }
+        return {
+            "ok": True,
+            "artifact": artifact,
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "artifactId": artifact["artifactId"],
+                    "versionId": artifact["versionId"],
+                    "title": artifact["title"],
+                    "fileCount": len(artifact["files"]),
+                },
+                ensure_ascii=False,
+            ),
+        }
 
     @staticmethod
     def _run_file_tool_handler(handler_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -548,7 +793,7 @@ class LocalToolRuntime:
 
     @staticmethod
     def _run_external_tool_handler(module_name: str, handler_name: str, args: dict[str, Any]) -> dict[str, Any]:
-        # 검색/브라우저 실행 모듈은 선택 의존성이 많아 호출 시점에만 불러온다.
+        # 검색/외부 연동 모듈은 선택 의존성이 많아 호출 시점에만 불러온다.
         import importlib
 
         module = importlib.import_module(module_name)
@@ -574,37 +819,6 @@ class LocalToolRuntime:
                 order.append(item["id"])
             existing[item["id"]] = item
         return [existing[item_id] for item_id in order if item_id in existing]
-
-    def _write_steps(self, steps: list[Any], *, merge: bool) -> list[dict[str, str]]:
-        normalized = [
-            self._normalize_step_item(item, index=index)
-            for index, item in enumerate(steps)
-            if isinstance(item, dict)
-        ]
-        if not merge:
-            return self._dedupe_todos(normalized)
-
-        existing = {item["id"]: dict(item) for item in self._step_items}
-        order = [item["id"] for item in self._step_items]
-        for item in normalized:
-            if item["id"] not in existing:
-                order.append(item["id"])
-            existing[item["id"]] = item
-        return [existing[item_id] for item_id in order if item_id in existing]
-
-    @staticmethod
-    def _normalize_step_item(item: dict[str, Any], *, index: int) -> dict[str, str]:
-        normalized = LocalToolRuntime._normalize_todo_item(item, index=index)
-        title = str(item.get("title") or item.get("content") or normalized["content"]).strip()
-        summary = str(item.get("summary") or title).strip()
-        goal = str(item.get("goal") or summary or title).strip()
-        return {
-            "id": normalized["id"],
-            "title": title or normalized["content"],
-            "summary": summary or title or normalized["content"],
-            "goal": goal or summary or title or normalized["content"],
-            "status": normalized["status"],
-        }
 
     def _delegate_task(self, args: dict[str, Any]) -> dict[str, Any]:
         """worker 위임 요청을 실행 엔진이 해석할 수 있는 handoff 계약으로 정규화한다."""
@@ -675,6 +889,9 @@ class LocalToolRuntime:
                 self.runtime_context["workId"] = parent.work_id
                 self.runtime_context["workIdentifier"] = parent.identifier
                 self.runtime_context["workAssigneeAgentId"] = parent.assignee_agent_id
+                root_claim_error = self._mark_session_agent_root_run_started(parent.work_id)
+                if root_claim_error is not None:
+                    return root_claim_error
                 parent_work_id = parent.work_id
             else:
                 return self._tool_error(
@@ -745,6 +962,17 @@ class LocalToolRuntime:
             )
 
         profile_id = str(profile.get("profile_id") or "").strip()
+        child_client_request_id = self._session_agent_child_client_request_id(
+            context=context,
+            parent_work_id=parent.work_id,
+            profile_id=profile_id,
+            title=title,
+            instruction=instruction,
+            description=description,
+            args=args,
+            required_skill_names=required_skill_names,
+        )
+        existing_child = self.work_repository.get_work_by_client_request_id(parent.session_id, child_client_request_id)
         child = WorkService(self.work_repository).create_from_payload(
             session_id=parent.session_id,
             owner_key=parent.owner_key,
@@ -763,30 +991,40 @@ class LocalToolRuntime:
                 "metadata": {
                     "createdByWorkId": parent.work_id,
                     "createdByTool": "session_agent_task",
+                    "clientRequestId": child_client_request_id,
                 },
             },
-            client_request_id=None,
+            client_request_id=child_client_request_id,
         )
         block_parent_until_done = args.get("blockParentUntilDone", args.get("block_parent_until_done"))
-        if block_parent_until_done is True:
+        if block_parent_until_done is True and existing_child is None:
             self.work_repository.add_relation(
                 source_work_id=child.work_id,
                 target_work_id=parent.work_id,
                 relation_type="blocks",
             )
-        self.work_repository.add_comment(
-            WorkComment(
-                comment_id=new_id("comment"),
-                work_id=parent.work_id,
-                author_type="system",
-                body=f"{child.identifier} 하위 작업을 만들고 세션 에이전트에게 배정했습니다.",
-                metadata={"childWorkId": child.work_id, "assigneeAgentId": profile_id},
+        if existing_child is None:
+            self.work_repository.add_comment(
+                WorkComment(
+                    comment_id=new_id("comment"),
+                    work_id=parent.work_id,
+                    author_type="system",
+                    body=f"{child.identifier} 하위 작업을 만들고 세션 에이전트에게 배정했습니다.",
+                    metadata={
+                        "childWorkId": child.work_id,
+                        "assigneeAgentId": profile_id,
+                        "clientRequestId": child_client_request_id,
+                    },
+                )
             )
-        )
         config = dict(profile.get("config_snapshot") or {})
         return {
             "ok": True,
-            "content": f"{child.identifier} child work accepted: {child.title}",
+            "content": (
+                f"{child.identifier} child work already accepted: {child.title}"
+                if existing_child is not None
+                else f"{child.identifier} child work accepted: {child.title}"
+            ),
             "parent_work": self._work_tool_payload(parent),
             "child_work": self._work_tool_payload(child),
             "agent": {
@@ -794,7 +1032,8 @@ class LocalToolRuntime:
                 "name": str(config.get("name") or profile.get("profile_key") or profile_id),
                 "role": str(config.get("role") or profile.get("agent_type") or "user_subagent"),
             },
-            "startExecution": True,
+            "reused": existing_child is not None,
+            "startExecution": existing_child is None,
         }
 
     def _create_session_agent_root_work(self, *, args: dict[str, Any], context: dict[str, Any]):
@@ -806,6 +1045,12 @@ class LocalToolRuntime:
         prompt = str(context.get("prompt") or "").strip()
         title = str(args.get("title") or prompt or "세션 에이전트 작업").strip()
         description = str(prompt or args.get("description") or title).strip()
+        client_request_id = self._session_agent_root_client_request_id(
+            context=context,
+            title=title,
+            description=description,
+            prompt=prompt,
+        )
         return WorkService(self.work_repository).create_from_payload(
             session_id=session_id,
             owner_key=owner_key,
@@ -817,39 +1062,95 @@ class LocalToolRuntime:
                 "executionInstruction": description,
                 "assigneeAgentId": "CEO",
                 "source": "session_agent_task",
-                "metadata": {"createdByTool": "session_agent_task"},
+                "metadata": {
+                    "createdByTool": "session_agent_task",
+                    "clientRequestId": client_request_id,
+                },
             },
-            client_request_id=None,
+            client_request_id=client_request_id,
         )
 
-    def _work_disposition(self, args: dict[str, Any]) -> dict[str, Any]:
-        context = dict(self.runtime_context or {})
-        work_id = self._optional_text(context.get("workId") or context.get("work_id"))
-        if not work_id:
+    def _mark_session_agent_root_run_started(self, work_id: str) -> dict[str, Any] | None:
+        task_run_id = self._optional_text(self.runtime_context.get("taskRunId") or self.runtime_context.get("task_run_id"))
+        if not task_run_id:
+            return None
+        try:
+            WorkService(self.work_repository).mark_run_started(work_id=work_id, task_run_id=task_run_id)
+        except WorkRunClaimConflict:
             return self._tool_error(
-                code="work_context_required",
-                message="work_disposition requires a connected work item",
-                tool_name="work_disposition",
+                code="work_run_conflict",
+                message="session agent root work already has an active run",
+                tool_name="session_agent_task",
+                details={"workId": work_id, "taskRunId": task_run_id},
             )
-        status = self._optional_text(args.get("status"))
-        if status not in {"todo", "in_progress", "in_review", "blocked", "done", "cancelled"}:
-            return self._tool_error(
-                code="invalid_work_status",
-                message="work_disposition status is invalid",
-                tool_name="work_disposition",
-            )
-        summary = str(args.get("summary") or "").strip()
-        next_action = self._optional_text(args.get("nextAction") or args.get("next_action"))
-        return {
-            "ok": True,
-            "content": f"work disposition accepted: {status}",
-            "workDisposition": {
-                "workId": work_id,
-                "status": status,
-                "summary": summary,
-                "nextAction": next_action,
-            },
-        }
+        return None
+
+    @classmethod
+    def _session_agent_root_client_request_id(
+        cls,
+        *,
+        context: dict[str, Any],
+        title: str,
+        description: str,
+        prompt: str,
+    ) -> str:
+        turn_id = cls._session_agent_turn_id(context)
+        digest = cls._stable_digest({"title": title, "description": description, "prompt": prompt})
+        return f"session-agent-root:v1:{turn_id}:{digest}"
+
+    @classmethod
+    def _session_agent_child_client_request_id(
+        cls,
+        *,
+        context: dict[str, Any],
+        parent_work_id: str,
+        profile_id: str,
+        title: str,
+        instruction: str,
+        description: str,
+        args: dict[str, Any],
+        required_skill_names: list[str],
+    ) -> str:
+        turn_id = cls._session_agent_turn_id(context)
+        digest = cls._stable_digest(
+            {
+                "parentWorkId": parent_work_id,
+                "profileId": profile_id,
+                "title": title,
+                "instruction": instruction,
+                "description": description,
+                "expectedDeliverable": args.get("expectedDeliverable") or args.get("expected_deliverable"),
+                "acceptanceCriteria": args.get("acceptanceCriteria") or args.get("acceptance_criteria"),
+                "constraints": args.get("constraints"),
+                "requiredSkillNames": required_skill_names,
+            }
+        )
+        return f"session-agent-child:v1:{turn_id}:{parent_work_id}:{profile_id}:{digest}"
+
+    @staticmethod
+    def _session_agent_turn_id(context: dict[str, Any]) -> str:
+        # 같은 사용자 턴이 재실행되어도 같은 work를 가리키게 하는 안정 키다.
+        # 값이 없는 오래된 호출은 task_run_id를 마지막 경계로 쓰고, 그래도 없으면 prompt hash로 떨어진다.
+        for key in (
+            "promptMessageId",
+            "prompt_message_id",
+            "client_message_id",
+            "clientMessageId",
+            "retry_source_message_id",
+            "after_user_message_version",
+            "completion_expected_version",
+            "taskRunId",
+            "task_run_id",
+        ):
+            value = str(context.get(key) or "").strip()
+            if value:
+                return re.sub(r"[^A-Za-z0-9_.:-]+", "_", value)[:120]
+        return LocalToolRuntime._stable_digest({"prompt": context.get("prompt") or ""})
+
+    @staticmethod
+    def _stable_digest(value: Any) -> str:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
     def _run_terminal_command(self, args: dict[str, Any]) -> dict[str, Any]:
         argv = list(args.get("argv") or []) or None
@@ -909,6 +1210,16 @@ class LocalToolRuntime:
             trusted_args.pop("userId", None)
             trusted_args.pop("user_id", None)
             trusted_args["_trusted_user_id"] = self.owner_key
+        if tool_name == "gmail.execute":
+            # 사용자 식별자는 모델 인자가 아니라 서버가 바인딩한 owner_key만 신뢰한다.
+            trusted_args.pop("userId", None)
+            trusted_args.pop("user_id", None)
+            trusted_args["_trusted_user_id"] = self.owner_key
+        if tool_name == "prototype.create_artifact":
+            trusted_args["_trusted_owner_key"] = self.owner_key
+            trusted_args["_trusted_session_id"] = self._optional_text(
+                self.runtime_context.get("sessionId") or self.runtime_context.get("session_id")
+            )
         return trusted_args
 
     def _resolve_terminal_cwd(self, value: Any) -> str:
@@ -974,50 +1285,6 @@ class LocalToolRuntime:
         marker = f"\n[truncated: {field_name} exceeded {MAX_TERMINAL_STREAM_CHARS} chars]\n"
         keep = max(0, MAX_TERMINAL_STREAM_CHARS - len(marker))
         return value[:keep] + marker, True
-
-    @classmethod
-    def _cap_tool_result(cls, result: dict[str, Any]) -> dict[str, Any]:
-        """도구 결과가 transcript와 API 응답을 과도하게 키우지 않도록 문자열 필드를 제한한다."""
-
-        if not isinstance(result, dict):
-            return result
-
-        truncated_fields: list[str] = []
-        capped = cls._cap_result_value(result, path="", truncated_fields=truncated_fields)
-        if not truncated_fields or not isinstance(capped, dict):
-            return capped
-        capped["result_truncated"] = True
-        capped["truncated_fields"] = truncated_fields[:MAX_TOOL_RESULT_TRUNCATED_FIELDS]
-        return capped
-
-    @classmethod
-    def _cap_result_value(cls, value: Any, *, path: str, truncated_fields: list[str]) -> Any:
-        if isinstance(value, str):
-            if len(value) <= MAX_TOOL_RESULT_STRING_CHARS:
-                return value
-            marker = f"\n[truncated: result field exceeded {MAX_TOOL_RESULT_STRING_CHARS} chars]\n"
-            keep = max(0, MAX_TOOL_RESULT_STRING_CHARS - len(marker))
-            truncated_fields.append(path or "$")
-            return value[:keep] + marker
-        if isinstance(value, list):
-            return [
-                cls._cap_result_value(
-                    item,
-                    path=f"{path}.{index}" if path else str(index),
-                    truncated_fields=truncated_fields,
-                )
-                for index, item in enumerate(value)
-            ]
-        if isinstance(value, dict):
-            return {
-                key: cls._cap_result_value(
-                    item,
-                    path=f"{path}.{key}" if path else str(key),
-                    truncated_fields=truncated_fields,
-                )
-                for key, item in value.items()
-            }
-        return value
 
     @staticmethod
     def _resolve_workspace_root(value: str | os.PathLike[str] | None = None) -> Path:
@@ -1114,26 +1381,12 @@ class LocalToolRuntime:
         if not isinstance(value, list):
             return ["skills", "terminal", "file", "web"]
         tool_name_to_toolset = {
-            "web_search": "web",
-            "web_extract": "web",
-            "web_crawl": "web",
             "http_get": "web",
             "read_file": "file",
             "write_file": "file",
             "patch": "file",
             "search_files": "file",
             "terminal.run": "terminal",
-            "browser_navigate": "browser",
-            "browser_snapshot": "browser",
-            "browser_click": "browser",
-            "browser_type": "browser",
-            "browser_scroll": "browser",
-            "browser_back": "browser",
-            "browser_press": "browser",
-            "browser_get_images": "browser",
-            "browser_vision": "browser",
-            "browser_console": "browser",
-            "browser_cdp": "browser",
         }
         normalized: list[str] = []
         for item in value:
@@ -1187,8 +1440,7 @@ class LocalToolRuntime:
         text_parts: list[str],
     ) -> list[str]:
         explicit = self._string_list(args.get("requiredSkillNames") or args.get("required_skill_names"))
-        if explicit:
-            return explicit
+        required: list[str] = list(explicit)
 
         parent_skill_names = self._string_list(
             context.get("enabledSkillNames")
@@ -1202,14 +1454,54 @@ class LocalToolRuntime:
             if isinstance(config, dict):
                 parent_skill_names = self._string_list(config.get("skills"))
         if not parent_skill_names:
-            return []
+            return required
 
-        haystack = self._normalize_match_text(" ".join(text_parts))
-        required: list[str] = []
         for skill_name in parent_skill_names:
-            if self._normalize_match_text(skill_name) in haystack:
+            if self._has_required_parent_skill_reference(skill_name, text_parts):
                 self._append_unique(required, skill_name)
         return required
+
+    def _has_required_parent_skill_reference(self, skill_name: str, text_parts: list[str]) -> bool:
+        needle = self._normalize_match_text(skill_name)
+        if not needle:
+            return False
+        for text_part in text_parts:
+            haystack = self._normalize_match_text(text_part)
+            start = 0
+            while True:
+                index = haystack.find(needle, start)
+                if index < 0:
+                    break
+                if not self._skill_reference_is_excluded(haystack, index, len(needle)):
+                    return True
+                start = index + len(needle)
+        return False
+
+    @staticmethod
+    def _skill_reference_is_excluded(haystack: str, index: int, length: int) -> bool:
+        window_start = max(0, index - 80)
+        window_end = min(len(haystack), index + length + 80)
+        window = haystack[window_start:window_end]
+        exclusion_markers = (
+            "수행하지",
+            "하지마",
+            "하지않",
+            "맡기지",
+            "요구하지",
+            "필요없",
+            "제외",
+            "팀장이직접",
+            "직접처리",
+            "donot",
+            "doesnot",
+            "mustnot",
+            "shouldnot",
+            "notrequire",
+            "notrequired",
+            "exclude",
+            "without",
+        )
+        return any(marker in window for marker in exclusion_markers)
 
     def _missing_profile_skills(self, profile: dict[str, Any], required_skill_names: list[str] | None) -> list[str]:
         if not required_skill_names:
@@ -1395,3 +1687,10 @@ class LocalToolRuntime:
         if isinstance(allowed_values, list) and value not in allowed_values:
             return f"{path} must be one of: {', '.join(str(item) for item in allowed_values)}"
         return None
+
+
+def _default_entry_file(files: dict[str, Any]) -> str:
+    for candidate in ("/src/App.tsx", "/src/App.jsx", "/src/main.tsx", "/src/main.jsx", "/index.html"):
+        if candidate in files:
+            return candidate
+    return next(iter(files))

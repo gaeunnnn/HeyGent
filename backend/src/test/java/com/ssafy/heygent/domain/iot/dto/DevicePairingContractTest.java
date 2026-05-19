@@ -21,7 +21,7 @@ class DevicePairingContractTest {
     @Test
     void startRequestAcceptsDeviceIdentity() {
         DisplayPairingStartRequest request = new DisplayPairingStartRequest(
-            "deskmate-c3-a1b2c3",
+            "heygent-c3-a1b2c3",
             "nonce-001",
             "0.1.0"
         );
@@ -41,6 +41,26 @@ class DevicePairingContractTest {
     }
 
     @Test
+    void startRequestRequiresHeygentDeviceIdentity() {
+        DisplayPairingStartRequest request = new DisplayPairingStartRequest(
+            "deskmate-c3-a1b2c3",
+            "nonce-001",
+            "0.1.0"
+        );
+
+        assertThat(validator.validate(request)).isNotEmpty();
+    }
+
+    @Test
+    void registerRequestRequiresHeygentDeviceIdentity() {
+        DeviceRegisterRequest validRequest = new DeviceRegisterRequest("heygent-c3-a1b2c3", "HeyGent");
+        DeviceRegisterRequest invalidRequest = new DeviceRegisterRequest("esp32c3-oled-001", "HeyGent");
+
+        assertThat(validator.validate(validRequest)).isEmpty();
+        assertThat(validator.validate(invalidRequest)).isNotEmpty();
+    }
+
+    @Test
     void pairRequestRequiresSixDigitPairCode() {
         DevicePairRequest validRequest = new DevicePairRequest("482913", "desk oled");
         DevicePairRequest invalidRequest = new DevicePairRequest("48291A", "desk oled");
@@ -56,7 +76,7 @@ class DevicePairingContractTest {
 
         DevicePairingSession session = DevicePairingSession.pending(
             "482913",
-            "deskmate-c3-a1b2c3",
+            "heygent-c3-a1b2c3",
             "nonce-001",
             "0.1.0",
             createdAt,
@@ -65,7 +85,7 @@ class DevicePairingContractTest {
 
         assertThat(session.status()).isEqualTo(DevicePairingStatus.PENDING);
         assertThat(session.pairCode()).isEqualTo("482913");
-        assertThat(session.deviceId()).isEqualTo("deskmate-c3-a1b2c3");
+        assertThat(session.deviceId()).isEqualTo("heygent-c3-a1b2c3");
         assertThat(session.expiresAt()).isEqualTo(expiresAt);
     }
 }

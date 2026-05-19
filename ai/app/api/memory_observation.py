@@ -53,6 +53,7 @@ def build_writeback_observation(
     candidates: list[dict[str, Any]] | None = None,
     reason: str | None = None,
     failed: bool = False,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     items = list(candidates or [])
     observation: dict[str, Any] = {
@@ -67,6 +68,8 @@ def build_writeback_observation(
     }
     if reason:
         observation["reason"] = reason
+    if extra:
+        observation.update(extra)
     return observation
 
 

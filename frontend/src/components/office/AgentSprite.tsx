@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useLayoutEffect, useRef, useEffect } from 'react'
 import type { AgentRuntime } from './types'
 import type { AgentVisualizationInfo } from './types'
 
@@ -10,6 +10,10 @@ const SPAWN_KEYFRAMES = `
 @keyframes workingPulse {
   0%, 100% { opacity: 0.95; transform: scale(1); }
   50%       { opacity: 0.5;  transform: scale(0.88); }
+}
+@keyframes bubbleFadeIn {
+  0%   { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  100% { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 `
 
@@ -35,21 +39,8 @@ const SITTING_SPRITES: Record<string, string> = {
 
 const WALK_FRAMES = ['walk_side_01', 'walk_side_stand', 'walk_side_02', 'walk_side_stand'] as const
 
-const TASK_STATUS_LABEL: Record<string, string> = {
-  pending: '대기 중',
-  in_progress: '진행 중',
-  completed: '완료',
-  failed: '실패',
-}
-
-const TASK_STATUS_COLOR: Record<string, string> = {
-  pending: '#fde047',
-  in_progress: '#93c5fd',
-  completed: '#86efac',
-  failed: '#fca5a5',
-}
-
-function getSpriteSrc(agent: AgentRuntime): string {
+function getSpriteSrc(agent: AgentRuntime, standingUp: boolean): string {
+  if (standingUp) return `${agent.config.spritePath}/idle_front.png`
   const base = agent.config.spritePath
   const sittingMap = agent.config.sittingSprites
     ? { ...SITTING_SPRITES, ...agent.config.sittingSprites }
@@ -63,7 +54,7 @@ function getSpriteSrc(agent: AgentRuntime): string {
 interface AgentSpriteProps {
   agent: AgentRuntime
   onArrived: (agentId: string) => void
-  onClick?: (agentId: string) => void
+  onClick?: (agentId: string, event: { clientX: number; clientY: number }) => void
   hoverInfo?: AgentVisualizationInfo
   isSelected?: boolean
   isSpawning?: boolean
@@ -77,21 +68,52 @@ export function AgentSprite({
   isSelected,
   isSpawning,
 }: AgentSpriteProps) {
-  const [isHovered, setIsHovered] = useState(false)
   useEffect(() => {
     injectSpawnStyles()
   }, [])
+
+  // sitting_desk → walking 전환 시 idle_front를 브라우저 첫 페인트 전에 삽입
+  // useLayoutEffect로 동기 처리 — walk 스프라이트가 한 프레임도 노출되지 않도록 한다.
+  const [standingUp, setStandingUp] = useState(false)
+  const prevStateRef = useRef(agent.state)
+  const standingUpTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  useLayoutEffect(() => {
+    const prevState = prevStateRef.current
+    prevStateRef.current = agent.state
+
+    if (agent.state === 'walking' && prevState === 'sitting_desk') {
+      setStandingUp(true)
+      clearTimeout(standingUpTimerRef.current)
+      standingUpTimerRef.current = setTimeout(() => setStandingUp(false), 150)
+    } else if (agent.state !== 'walking') {
+      clearTimeout(standingUpTimerRef.current)
+      standingUpTimerRef.current = setTimeout(() => setStandingUp(false), 0)
+    }
+
+    return () => clearTimeout(standingUpTimerRef.current)
+  }, [agent.state])
+
   const { config, position, state, transitionDuration } = agent
   const scale = (config.scale ?? 1) * (config.stateScales?.[state] ?? 1)
   const size = (state === 'sitting_desk' ? SIZE_SITTING : SIZE_NORMAL) * scale
   const isInteractive = !!onClick
 
-  const showTooltip = isHovered && !!hoverInfo
+  const [hovered, setHovered] = useState(false)
+  const zIndex = isSelected ? 25 : hovered ? 20 : 10
 
-  let zIndex = 10
-  if (isSelected && isHovered) zIndex = 30
-  else if (isSelected) zIndex = 25
-  else if (isHovered) zIndex = 20
+  const [bubbleHovered, setBubbleHovered] = useState(false)
+
+  const showBubble =
+    !isSpawning &&
+    hoverInfo?.activityStatus === 'working' &&
+    !!hoverInfo.currentTask &&
+    hoverInfo.currentTask.status === 'in_progress'
+
+  const imgTransform =
+    agent.facingRight && (state === 'walking' || state === 'standing_wait')
+      ? 'scaleX(-1)'
+      : undefined
 
   return (
     <div
@@ -110,9 +132,12 @@ export function AgentSprite({
       onTransitionEnd={(e) => {
         if (state === 'walking' && e.propertyName === 'transform') onArrived(config.id)
       }}
-      onClick={() => onClick?.(config.id)}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(config.id, { clientX: e.clientX, clientY: e.clientY })
+      }}
+      onMouseEnter={() => isInteractive && setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       {/* 스폰 전구 — 에이전트 등장 시 머리 위에 💡 아이콘이 팝업 */}
       {isSpawning && (
@@ -141,112 +166,77 @@ export function AgentSprite({
         </div>
       )}
 
-      {/* 작업 중 전구 — CEO가 ceo_work(sitting_work) 상태일 때 상시 표시 */}
-      {!isSpawning && agent.config.id === 'ceo' && agent.state === 'sitting_work' && (
+      {/* 작업 중 말풍선 — activityStatus가 working이고 현재 작업이 있을 때 상시 표시 */}
+      {showBubble && (
         <div
           style={{
             position: 'absolute',
             bottom: '100%',
             left: '50%',
             transform: 'translateX(-50%)',
-            marginBottom: 6,
-            pointerEvents: 'none',
-            zIndex: 40,
+            marginBottom: 10,
+            zIndex: bubbleHovered ? 50 : 40,
+            pointerEvents: 'auto',
+            maxWidth: bubbleHovered ? 260 : 200,
+            width: 'max-content',
+            animation: 'bubbleFadeIn 0.25s ease both',
           }}
+          onMouseEnter={() => setBubbleHovered(true)}
+          onMouseLeave={() => setBubbleHovered(false)}
         >
-          <span
-            style={{
-              display: 'block',
-              fontSize: 22,
-              lineHeight: 1,
-              animation: 'workingPulse 2s ease-in-out infinite',
-              filter: 'drop-shadow(0 0 8px rgba(253, 224, 71, 0.85))',
-            }}
-          >
-            💡
-          </span>
-        </div>
-      )}
-
-      {/* 호버 툴팁 */}
-      {showTooltip && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: '100%',
-            left: '65%',
-            transform: 'translateX(-50%)',
-            marginBottom: 12,
-            zIndex: 50,
-            pointerEvents: 'none',
-            minWidth: 190,
-          }}
-        >
+          {/* 말풍선 본체 */}
           <div
             style={{
-              background: 'rgba(8, 8, 18, 0.90)',
-              border: '1px solid rgba(255,255,255,0.12)',
-              borderRadius: 12,
-              padding: '10px 14px',
+              background: 'rgba(10, 10, 22, 0.92)',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: 10,
+              padding: '7px 11px',
               backdropFilter: 'blur(12px)',
-              boxShadow: '0 6px 28px rgba(0,0,0,0.6)',
+              boxShadow: '0 4px 20px rgba(0,0,0,0.55)',
+              display: 'flex',
+              alignItems: bubbleHovered ? 'flex-start' : 'center',
+              gap: 6,
             }}
           >
-            {/* 이름 + 역할 */}
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ color: 'white', fontSize: 13, fontWeight: 700 }}>{hoverInfo.name}</div>
-              <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11, marginTop: 2 }}>
-                {hoverInfo.role}
-              </div>
-            </div>
-
-            {/* 현재 작업 */}
-            {hoverInfo.currentTask && (
-              <div
-                style={{
-                  borderTop: '1px solid rgba(255,255,255,0.08)',
-                  paddingTop: 8,
-                }}
-              >
-                <div
-                  style={{
-                    color: 'rgba(255,255,255,0.35)',
-                    fontSize: 10,
-                    marginBottom: 4,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                  }}
-                >
-                  현재 작업
-                </div>
-                <div style={{ color: 'white', fontSize: 12, fontWeight: 600 }}>
-                  {hoverInfo.currentTask.title}
-                </div>
-                <div
-                  style={{
-                    color:
-                      TASK_STATUS_COLOR[hoverInfo.currentTask.status] ?? 'rgba(255,255,255,0.5)',
-                    fontSize: 11,
-                    marginTop: 3,
-                  }}
-                >
-                  ● {TASK_STATUS_LABEL[hoverInfo.currentTask.status]}
-                </div>
-              </div>
-            )}
+            <span
+              style={{
+                fontSize: 13,
+                lineHeight: 1,
+                flexShrink: 0,
+                animation: 'workingPulse 2s ease-in-out infinite',
+                filter: 'drop-shadow(0 0 5px rgba(253, 224, 71, 0.85))',
+                marginTop: bubbleHovered ? 1 : 0,
+              }}
+            >
+              💡
+            </span>
+            <span
+              style={{
+                color: 'white',
+                fontSize: 11,
+                fontWeight: 600,
+                whiteSpace: bubbleHovered ? 'normal' : 'nowrap',
+                overflow: bubbleHovered ? 'visible' : 'hidden',
+                textOverflow: bubbleHovered ? 'unset' : 'ellipsis',
+                maxWidth: bubbleHovered ? 220 : 155,
+                wordBreak: bubbleHovered ? 'break-word' : undefined,
+              }}
+            >
+              {hoverInfo!.currentTask!.title}
+            </span>
           </div>
 
-          {/* 말풍선 꼬리 — 툴팁 left 65% 기준으로 왼쪽 35% 위치에 배치 */}
+          {/* 말풍선 꼬리 */}
           <div
             style={{
               position: 'absolute',
               bottom: -5,
-              left: '35%',
+              left: '50%',
               marginLeft: -5,
               width: 10,
               height: 10,
-              background: 'rgba(8, 8, 18, 0.90)',
-              border: '1px solid rgba(255,255,255,0.12)',
+              background: 'rgba(10, 10, 22, 0.92)',
+              border: '1px solid rgba(255,255,255,0.15)',
               borderTop: 'none',
               borderLeft: 'none',
               transform: 'rotate(45deg)',
@@ -256,19 +246,16 @@ export function AgentSprite({
       )}
 
       <img
-        src={getSpriteSrc(agent)}
+        src={getSpriteSrc(agent, standingUp)}
         alt={config.name}
         draggable={false}
         style={{
           width: '100%',
           height: '100%',
           userSelect: 'none',
-          transform:
-            agent.facingRight && (agent.state === 'walking' || agent.state === 'standing_wait')
-              ? 'scaleX(-1)'
-              : undefined,
-          filter: isHovered ? 'brightness(1.15)' : undefined,
-          transition: 'filter 0.15s ease',
+          transform: [imgTransform, hovered ? 'translateY(-6px)' : null].filter(Boolean).join(' '),
+          filter: hovered ? 'drop-shadow(0 6px 10px rgba(0, 0, 0, 0.45))' : undefined,
+          transition: 'transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.18s ease',
         }}
       />
     </div>

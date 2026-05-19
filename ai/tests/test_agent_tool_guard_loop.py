@@ -1,9 +1,11 @@
+import json
 from types import SimpleNamespace
 import pytest
 
 from app.contracts.task.step_status import StepStatus
 from app.contracts.task.task_status import TaskStatus
 from app.domain.orchestration.agent.tool_calling_loop import ToolCallingLoopHandler
+from app.domain.orchestration.agent.tool_result_store import read_raw_tool_result_chunk
 from app.domain.orchestration.agent.tool_guard import ToolGuardDecision, ToolGuardResult
 from app.domain.providers.model.base import AgentMessage, AgentModelResponse, AssistantToolCall, ToolResultMessage
 
@@ -92,6 +94,40 @@ class FakeDelegateToolCatalog:
         ]
 
 
+class FakeToolResultCatalog:
+    def list_available_tools(self, *, requested_toolsets=None):
+        return [
+            {
+                "name": "terminal.run",
+                "summary": "terminal",
+                "toolset": "terminal",
+                "schema": {
+                    "name": "terminal.run",
+                    "description": "terminal",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "name": "tool_result.read",
+                "summary": "raw result reader",
+                "toolset": "tool-result",
+                "schema": {
+                    "name": "tool_result.read",
+                    "description": "read raw result",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "raw_ref": {"type": "string"},
+                            "offset": {"type": "integer"},
+                            "limit": {"type": "integer"},
+                        },
+                        "required": ["raw_ref"],
+                    },
+                },
+            },
+        ]
+
+
 class FakeSessionStore:
     def __init__(self) -> None:
         self.sessions_by_key: dict[str, dict] = {}
@@ -155,6 +191,16 @@ class RecordingRuntime:
         return {"ok": True, "content": "executed"}
 
 
+class SequenceRuntime(RecordingRuntime):
+    def __init__(self, results: list[dict]) -> None:
+        super().__init__()
+        self.results = iter(results)
+
+    def run_call(self, *, name, args, enabled_toolsets=None):
+        self.calls.append({"name": name, "args": args, "enabled_toolsets": enabled_toolsets})
+        return next(self.results)
+
+
 class DelegationRuntime(RecordingRuntime):
     def run_call(self, *, name, args, enabled_toolsets=None):
         self.calls.append({"name": name, "args": args, "enabled_toolsets": enabled_toolsets})
@@ -169,6 +215,24 @@ class DelegationRuntime(RecordingRuntime):
                 "metadata": {"profile_key": args.get("profile_key") or "worker.default"},
             },
         }
+
+
+class ToolResultReadRuntime(RecordingRuntime):
+    def __init__(self, large_result: dict) -> None:
+        super().__init__()
+        self.large_result = large_result
+
+    def run_call(self, *, name, args, enabled_toolsets=None):
+        self.calls.append({"name": name, "args": args, "enabled_toolsets": enabled_toolsets})
+        if name == "terminal.run":
+            return self.large_result
+        if name == "tool_result.read":
+            return read_raw_tool_result_chunk(
+                str(args.get("raw_ref") or ""),
+                offset=int(args.get("offset") or 0),
+                limit=int(args.get("limit") or 500),
+            )
+        return {"ok": False, "error": {"code": "unexpected_tool"}}
 
 
 class StaticGuard:
@@ -186,6 +250,10 @@ class StaticGuard:
             }
         )
         return self.result
+
+
+class ProviderRateLimitError(Exception):
+    status_code = 429
 
 
 def test_worker_transcript_session_id_is_reused_without_collapsing_into_parent_session():
@@ -230,6 +298,31 @@ async def test_agent_loop_prefers_provider_respond_async():
     assert outcome["step_status"] == StepStatus.COMPLETED
     assert outcome["result_payload"]["text"] == "async ok"
     assert provider.calls[0]["runtime_context"]["task_run_id"] == "task_guard"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_emits_model_call_timing_events():
+    provider = AsyncOnlyProvider([_response(text="timed ok")])
+    handler = ToolCallingLoopHandler(
+        provider=provider,
+        prompt_builder=FakePromptBuilder(),
+        tool_runtime=RecordingRuntime(),
+        tool_catalog=FakeToolCatalog(),
+    )
+    events: list[dict] = []
+
+    async def progress_sink(**kwargs):
+        events.append(kwargs)
+
+    outcome = await handler.execute_async(task=_task(), step=_step(), progress_sink=progress_sink)
+
+    assert outcome["step_status"] == StepStatus.COMPLETED
+    assert [event["event_type"] for event in events] == ["model.started", "model.completed"]
+    assert events[0]["payload"]["turnIndex"] == 1
+    assert events[0]["payload"]["messageCount"] >= 1
+    assert events[1]["payload"]["durationMs"] >= 0
+    assert events[1]["payload"]["finishReason"] == "stop"
+    assert events[1]["payload"]["toolCallCount"] == 0
 
 
 def _task(input_payload: dict | None = None):
@@ -349,10 +442,16 @@ async def test_delegate_task_executes_worker_before_deferring_later_sibling_tool
     assert [item["name"] for item in tool_results] == ["delegate_task", "write_file"]
     assert tool_results[0]["result"]["delegate"]["workerSessionId"] == "session_worker_web"
     assert tool_results[1]["result"]["error"]["code"] == "tool_deferred_by_delegate_boundary"
-    assert runtime.calls == [{"name": "delegate_task", "args": {"goal": "웹 자료 조사", "toolsets": ["web"]}, "enabled_toolsets": ("delegation", "file")}]
+    assert runtime.calls == [
+        {
+            "name": "delegate_task",
+            "args": {"goal": "웹 자료 조사", "toolsets": ["web"]},
+            "enabled_toolsets": ("delegation", "file", "tool-result"),
+        }
+    ]
     assert "child_session" not in outcome
     replayed_tool_messages = [message for message in provider.calls[1]["messages"] if isinstance(message, ToolResultMessage)]
-    assert replayed_tool_messages[0].content == "worker 조사 요약"
+    assert json.loads(replayed_tool_messages[0].content)["content"] == "worker 조사 요약"
 
 
 def test_guard_block_appends_blocked_tool_result_without_runtime_call():
@@ -385,6 +484,130 @@ def test_guard_block_appends_blocked_tool_result_without_runtime_call():
     assert len(replayed_tool_messages) == 1
     assert replayed_tool_messages[0].tool_call_id == "call_block"
     assert "blocked by policy" in replayed_tool_messages[0].content
+
+
+def test_large_tool_result_is_stored_as_raw_ref_and_replayed_as_bounded_observation(monkeypatch, tmp_path):
+    monkeypatch.setenv("HEYGENT_TOOL_RESULT_STORE_DIR", str(tmp_path / "tool-results"))
+    large_rows = [{"index": index, "value": "x" * 1500} for index in range(120)]
+    runtime = SequenceRuntime([{"ok": True, "json": {"items": large_rows}, "content_type": "application/json"}])
+    provider = FakeProvider(
+        [
+            _response(tool_calls=[_tool_call("call_large", "terminal_run", {"argv": ["fake-large"]})]),
+            _response(text="LARGE_DONE"),
+        ]
+    )
+    guard = StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW))
+
+    outcome = _handler(provider, runtime, guard).execute(task=_task(), step=_step())
+
+    observed_result = outcome["result_payload"]["tool_results"][0]["result"]
+    assert observed_result["truncated"] is True
+    assert observed_result["raw_ref"].startswith("tool-result://")
+    assert observed_result["raw_chars"] > 20_000
+    assert "x" * 1500 not in str(observed_result)
+
+    replayed_tool_messages = [message for message in provider.calls[1]["messages"] if isinstance(message, ToolResultMessage)]
+    assert len(replayed_tool_messages) == 1
+    assert replayed_tool_messages[0].tool_call_id == "call_large"
+    assert len(replayed_tool_messages[0].content) <= ToolCallingLoopHandler.TOOL_RESULT_OBSERVATION_MAX_CHARS
+    assert "Use tool_result.read" in replayed_tool_messages[0].content
+    assert "raw_ref" in replayed_tool_messages[0].content
+    assert "preview" in replayed_tool_messages[0].content
+    assert "x" * 1500 not in replayed_tool_messages[0].content
+
+    raw_chunk = read_raw_tool_result_chunk(observed_result["raw_ref"], limit=500)
+    assert raw_chunk["ok"] is True
+    assert raw_chunk["raw_chars"] == observed_result["raw_chars"]
+    assert '"items"' in raw_chunk["content"]
+    assert outcome["output_payload"]["tool_results"][0]["result"] == observed_result
+
+
+@pytest.mark.asyncio
+async def test_large_tool_result_transcript_and_progress_store_bounded_observation(monkeypatch, tmp_path):
+    monkeypatch.setenv("HEYGENT_TOOL_RESULT_STORE_DIR", str(tmp_path / "tool-results"))
+    large_rows = [{"index": index, "value": "x" * 1500} for index in range(120)]
+    runtime = SequenceRuntime([{"ok": True, "json": {"items": large_rows}, "content_type": "application/json"}])
+    provider = FakeProvider(
+        [
+            _response(tool_calls=[_tool_call("call_large", "terminal_run", {"argv": ["fake-large"]})]),
+            _response(text="LARGE_DONE"),
+        ]
+    )
+    guard = StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW))
+    session_store = FakeSessionStore()
+    events: list[dict] = []
+
+    async def progress_sink(**kwargs):
+        events.append(kwargs)
+
+    outcome = await _handler(provider, runtime, guard, session_store=session_store).execute_async(
+        task=_session_task(),
+        step=_step(),
+        progress_sink=progress_sink,
+    )
+
+    observed_result = outcome["result_payload"]["tool_results"][0]["result"]
+    session_id = session_store.sessions_by_key["sess_guard"]["id"]
+    tool_rows = [row for row in session_store.messages_by_session_id[session_id] if row["role"] == "tool"]
+    assert len(tool_rows) == 1
+    assert "raw_ref" in tool_rows[0]["content"]
+    assert "preview" in tool_rows[0]["content"]
+    assert "x" * 1500 not in tool_rows[0]["content"]
+
+    completed = [event for event in events if event["event_type"] == "tool.completed"]
+    assert len(completed) == 1
+    progress_result = completed[0]["payload"]["result"]
+    assert progress_result["raw_ref"] == observed_result["raw_ref"]
+    assert progress_result["truncated"] is True
+    assert "x" * 1500 not in json.dumps(progress_result, ensure_ascii=False)
+
+
+def test_tool_result_read_can_follow_raw_ref_without_reexpanding_result(monkeypatch, tmp_path):
+    monkeypatch.setenv("HEYGENT_TOOL_RESULT_STORE_DIR", str(tmp_path / "tool-results"))
+    large_rows = [{"index": index, "value": "x" * 1500} for index in range(120)]
+    runtime = ToolResultReadRuntime({"ok": True, "json": {"items": large_rows}, "content_type": "application/json"})
+
+    class RawRefProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+
+        def respond(self, messages, tools, model, tool_choice=None):
+            self.calls.append({"messages": list(messages), "tools": tools, "model": model, "tool_choice": tool_choice})
+            if len(self.calls) == 1:
+                return _response(tool_calls=[_tool_call("call_large", "terminal_run", {"argv": ["fake-large"]})])
+            if len(self.calls) == 2:
+                tool_message = next(message for message in messages if isinstance(message, ToolResultMessage))
+                raw_ref = json.loads(tool_message.content)["raw_ref"]
+                return _response(
+                    tool_calls=[
+                        _tool_call(
+                            "call_read",
+                            "tool_result_read",
+                            {"raw_ref": raw_ref, "offset": 0, "limit": 500},
+                        )
+                    ]
+                )
+            return _response(text="READ_DONE")
+
+    provider = RawRefProvider()
+    handler = ToolCallingLoopHandler(
+        provider=provider,
+        prompt_builder=FakePromptBuilder(),
+        tool_runtime=runtime,
+        tool_catalog=FakeToolResultCatalog(),
+        tool_guard=StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW)),
+    )
+
+    outcome = handler.execute(task=_task({"prompt": "read raw", "enabled_toolsets": ["terminal"]}), step=_step())
+
+    assert [call["name"] for call in runtime.calls] == ["terminal.run", "tool_result.read"]
+    assert runtime.calls[0]["enabled_toolsets"] == ("terminal", "tool-result")
+    assert runtime.calls[1]["enabled_toolsets"] == ("terminal", "tool-result")
+    read_result = outcome["result_payload"]["tool_results"][1]["result"]
+    assert read_result["ok"] is True
+    assert read_result["returned_chars"] <= 500
+    assert "truncated" not in read_result
+    assert outcome["result_payload"]["text"] == "READ_DONE"
 
 
 def test_agent_loop_explicit_max_iterations_can_exceed_legacy_hard_clamp():
@@ -434,6 +657,131 @@ def test_agent_loop_fails_when_max_iterations_are_exhausted_without_final_answer
     assert outcome["error_message"] == "작업 반복 한도(2)에 도달했습니다."
     assert len(provider.calls) == 2
     assert len(runtime.calls) == 2
+
+
+def test_repeated_rate_limited_tool_call_is_blocked_with_synthetic_result():
+    provider = FakeProvider(
+        [
+            _response(tool_calls=[_tool_call("call_1", "terminal_run", {"argv": ["curl", "weather"]})]),
+            _response(tool_calls=[_tool_call("call_2", "terminal_run", {"argv": ["curl", "weather"]})]),
+            _response(text="BLOCK_OBSERVED"),
+        ]
+    )
+    runtime = SequenceRuntime(
+        [
+            {
+                "ok": False,
+                "error": {
+                    "code": "upstream_rate_limit",
+                    "message": "HTTP 429 Too Many Requests",
+                    "status_code": 429,
+                    "retryable": True,
+                },
+                "content": '{"error":{"code":"upstream_rate_limit"}}',
+            }
+        ]
+    )
+    guard = StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW))
+
+    outcome = _handler(provider, runtime, guard).execute(
+        task=_task({"prompt": "run", "max_iterations": 5}),
+        step=_step(),
+    )
+
+    assert outcome["task_status"] == TaskStatus.COMPLETED
+    assert len(runtime.calls) == 1
+    assert [item["tool_call_id"] for item in outcome["result_payload"]["tool_results"]] == ["call_1", "call_2"]
+    blocked_result = outcome["result_payload"]["tool_results"][1]["result"]
+    assert blocked_result["error"]["code"] == "tool_circuit_open"
+    assert blocked_result["error"]["type"] == "rate_limited"
+    replayed_tool_messages = [message for message in provider.calls[2]["messages"] if isinstance(message, ToolResultMessage)]
+    assert [message.tool_call_id for message in replayed_tool_messages] == ["call_1", "call_2"]
+
+
+def test_repeated_circuit_open_call_fails_without_waiting_for_max_iterations():
+    provider = FakeProvider(
+        [
+            _response(tool_calls=[_tool_call("call_1", "terminal_run", {"argv": ["curl", "weather"]})]),
+            _response(tool_calls=[_tool_call("call_2", "terminal_run", {"argv": ["curl", "weather"]})]),
+            _response(tool_calls=[_tool_call("call_3", "terminal_run", {"argv": ["curl", "weather"]})]),
+        ]
+    )
+    runtime = SequenceRuntime(
+        [
+            {
+                "ok": False,
+                "error": {"code": "upstream_rate_limit", "message": "HTTP 429", "status_code": 429},
+                "content": '{"error":{"code":"upstream_rate_limit"}}',
+            }
+        ]
+    )
+    guard = StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW))
+
+    outcome = _handler(provider, runtime, guard).execute(
+        task=_task({"prompt": "run", "max_iterations": 10}),
+        step=_step(),
+    )
+
+    assert outcome["task_status"] == TaskStatus.FAILED
+    assert outcome["result_payload"]["error"]["code"] == "rate_limited_blocked"
+    assert outcome["result_payload"]["error"]["type"] == "rate_limited"
+    assert len(provider.calls) == 3
+    assert len(runtime.calls) == 1
+
+
+def test_unavailable_tool_name_streak_blocks_even_when_args_change():
+    provider = FakeProvider(
+        [
+            _response(tool_calls=[_tool_call("call_1", "terminal_run", {"argv": ["missing", "one"]})]),
+            _response(tool_calls=[_tool_call("call_2", "terminal_run", {"argv": ["missing", "two"]})]),
+            _response(text="UNAVAILABLE_BLOCK_OBSERVED"),
+        ]
+    )
+    runtime = SequenceRuntime(
+        [
+            {
+                "ok": False,
+                "error": {
+                    "code": "tool_unavailable",
+                    "message": "unknown or disabled runtime tool: terminal.run",
+                    "tool_name": "terminal.run",
+                },
+                "content": '{"error":{"code":"tool_unavailable"}}',
+            }
+        ]
+    )
+    guard = StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW))
+
+    outcome = _handler(provider, runtime, guard).execute(
+        task=_task({"prompt": "run", "max_iterations": 5}),
+        step=_step(),
+    )
+
+    assert outcome["task_status"] == TaskStatus.COMPLETED
+    assert len(runtime.calls) == 1
+    blocked_result = outcome["result_payload"]["tool_results"][1]["result"]
+    assert blocked_result["error"]["code"] == "tool_circuit_open"
+    assert blocked_result["error"]["type"] == "tool_unavailable"
+
+
+def test_provider_rate_limit_failure_is_not_recorded_as_tool_result():
+    provider = FakeProvider([])
+
+    def raise_rate_limit(*args, **kwargs):
+        raise ProviderRateLimitError("HTTP 429 Too Many Requests")
+
+    provider.respond = raise_rate_limit
+    runtime = RecordingRuntime()
+
+    outcome = _handler(provider, runtime, StaticGuard(ToolGuardResult(decision=ToolGuardDecision.ALLOW))).execute(
+        task=_task({"prompt": "run", "max_iterations": 5}),
+        step=_step(),
+    )
+
+    assert outcome["task_status"] == TaskStatus.FAILED
+    assert outcome["result_payload"]["error"]["code"] == "provider_rate_limited"
+    assert outcome["result_payload"]["tool_results"] == []
+    assert runtime.calls == []
 
 
 def test_agent_loop_worker_payload_uses_worker_default_when_max_iterations_is_absent():

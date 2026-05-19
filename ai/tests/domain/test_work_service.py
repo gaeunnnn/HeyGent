@@ -348,7 +348,7 @@ def test_work_disposition_from_task_result_updates_work_status():
     assert repository.comments[-1].task_run_id == "task-1"
     assert "공식 예매 확인 불가" in repository.comments[-1].body
     assert "사용자 확인 필요" in repository.comments[-1].body
-    assert repository.comments[-1].metadata["reason"] == "work_disposition"
+    assert repository.comments[-1].metadata["reason"] == "work_disposition_metadata"
 
 
 def test_linked_task_result_claims_work_from_disposition_work_id():
@@ -829,6 +829,34 @@ def test_terminal_children_enqueue_parent_wake_after_all_children_finish():
     assert len(queued) == 1
     assert queued[0].work_id == parent.work_id
     assert queued[0].reason == "children_completed"
+
+
+def test_terminal_child_does_not_wake_parent_with_active_run():
+    repository = FakeWorkRepository()
+    service = WorkService(repository)
+    parent = service.create_from_payload(
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        client_request_id=None,
+        payload={"rawUserInput": "부모 작업", "assigneeAgentId": "agent-parent"},
+    )
+    child = service.create_from_payload(
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        client_request_id=None,
+        payload={"rawUserInput": "자식 작업", "parentId": parent.work_id},
+    )
+    repository.update_status(parent.work_id, "in_progress")
+    repository.update_status(child.work_id, "done")
+    repository.items[parent.work_id] = WorkItem(
+        **{**_work_dict(repository.items[parent.work_id]), "active_run_id": "task-parent-running"}
+    )
+
+    queued = WorkWakeService(repository).enqueue_after_child_terminal_update(child_work_id=child.work_id)
+
+    assert queued == []
 
 
 def test_stranded_assigned_work_recovery_is_idempotent_and_visible():

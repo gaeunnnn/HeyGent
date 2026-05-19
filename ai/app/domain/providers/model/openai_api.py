@@ -152,7 +152,7 @@ class OpenAIAPIProvider(BaseProvider):
                 "tool_choice": tool_choice,
             },
         )
-        if credential_context is not None:
+        if credential_context is not None and credential_context.get("task_run_id"):
             self._record_backend_usage(
                 credential_context=credential_context,
                 model=agent_response.model,
@@ -215,7 +215,7 @@ class OpenAIAPIProvider(BaseProvider):
                 "tool_choice": tool_choice,
             },
         )
-        if credential_context is not None:
+        if credential_context is not None and credential_context.get("task_run_id"):
             await self._record_backend_usage(
                 credential_context=credential_context,
                 model=agent_response.model,
@@ -263,12 +263,12 @@ class OpenAIAPIProvider(BaseProvider):
         user_id = self._optional_text(runtime_context.get("user_id") or runtime_context.get("userId"))
         provider_name = self._optional_text(runtime_context.get("provider_name") or runtime_context.get("providerName"))
         task_run_id = self._optional_text(runtime_context.get("task_run_id") or runtime_context.get("taskRunId"))
-        if not user_id or not provider_name or not task_run_id:
+        if not user_id or not provider_name:
             return None
         return {
             "user_id": user_id,
             "provider_name": provider_name,
-            "task_run_id": task_run_id,
+            "task_run_id": task_run_id or "",
             "step_run_id": self._optional_text(runtime_context.get("step_run_id") or runtime_context.get("stepRunId")) or "",
             "session_id": self._optional_text(runtime_context.get("session_id") or runtime_context.get("sessionId")) or "",
             "model": model,

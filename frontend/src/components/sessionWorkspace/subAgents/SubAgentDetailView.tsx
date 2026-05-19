@@ -42,12 +42,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tabs } from '@/components/ui/tabs'
 import { getCommandUsage, type CommandUsageRecord } from '@/apis/aiCommandUsage'
-import {
-  getUserSkillDetail,
-  listUserSkills,
-  type SkillCatalogDetail,
-  type SkillCatalogItem,
-} from '@/apis/agents'
+import { getUserSkillDetail, type SkillCatalogDetail, type SkillCatalogItem } from '@/apis/agents'
+import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import { listTaskRuns } from '@/apis/taskRuns'
 import {
   getCachedTaskRuns,
@@ -88,7 +84,7 @@ export function SubAgentDetailView({
 }: {
   item: AgentPanelItem
   onDelete: () => Promise<void>
-  onSave: (agent: Agent) => void
+  onSave: (agent: Agent) => Agent | Promise<Agent | void> | void
   onTabChange?: (tab: SubAgentDetailTab) => void
   requestedTab?: string | null
   reservedNames: string[]
@@ -237,7 +233,9 @@ export function SubAgentDetailView({
     }
 
     let alive = true
-    void listUserSkills()
+    void useAgentCacheStore
+      .getState()
+      .fetchUserSkills()
       .then((items) => {
         if (!alive) return
         setSkillCatalog(items)
@@ -258,18 +256,22 @@ export function SubAgentDetailView({
     setSaved(false)
   }
 
+  const syncInstructionsDraft = (agent: Agent) => {
+    setInstructionsDraft(agent.instructions ?? '')
+    setInstructionsEntryFile(agent.instructionsEntryFile ?? 'AGENTS.md')
+    setInstructionsFiles(agent.instructionsFiles ?? {})
+    setInstructionsMode(agent.instructionsMode ?? 'managed')
+    setInstructionsRootPath(agent.instructionsRootPath ?? '')
+  }
+
   const resetInstructionsDraft = () => {
-    setInstructionsDraft(item.agent.instructions ?? '')
-    setInstructionsEntryFile(item.agent.instructionsEntryFile ?? 'AGENTS.md')
-    setInstructionsFiles(item.agent.instructionsFiles ?? {})
-    setInstructionsMode(item.agent.instructionsMode ?? 'managed')
-    setInstructionsRootPath(item.agent.instructionsRootPath ?? '')
+    syncInstructionsDraft(item.agent)
     setSaved(false)
   }
 
   const saveInstructionsDraft = () => {
     if (!instructionsDirty) return
-    onSave({
+    const result = onSave({
       ...item.agent,
       instructions: instructionsDraft.trim(),
       instructionsEntryFile: instructionsEntryFile.trim() || 'AGENTS.md',
@@ -277,8 +279,13 @@ export function SubAgentDetailView({
       instructionsMode,
       instructionsRootPath: instructionsRootPath.trim(),
     })
-    setSaved(true)
-    window.setTimeout(() => setSaved(false), 1400)
+    void Promise.resolve(result).then((savedAgent) => {
+      if (savedAgent !== undefined) {
+        syncInstructionsDraft(savedAgent)
+      }
+      setSaved(true)
+      window.setTimeout(() => setSaved(false), 1400)
+    })
   }
 
   const toggleSkill = (skillId: string, checked: boolean) => {
@@ -522,11 +529,11 @@ export function SubAgentDetailView({
       {tab === 'skills' && skillsDirty && (
         <div className="border-border bg-background/95 fixed inset-x-0 bottom-0 z-30 border-t backdrop-blur-sm sm:hidden">
           <div className="flex items-center justify-end gap-2 px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
-            <Button variant="ghost" size="sm" onClick={resetSkillDraft} disabled={skillSaving}>
-              취소
-            </Button>
             <Button size="sm" onClick={saveSkillDraft} disabled={skillSaving}>
               {skillSaving ? '저장 중' : '저장'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={resetSkillDraft} disabled={skillSaving}>
+              취소
             </Button>
           </div>
         </div>
@@ -534,11 +541,11 @@ export function SubAgentDetailView({
       {tab === 'skills' && skillsDirty && (
         <div className="fixed right-6 bottom-6 z-30 hidden sm:block">
           <div className="bg-background/90 border-border flex items-center gap-2 rounded-lg border px-3 py-1.5 shadow-lg backdrop-blur-sm">
-            <Button variant="ghost" size="sm" onClick={resetSkillDraft} disabled={skillSaving}>
-              취소
-            </Button>
             <Button size="sm" onClick={saveSkillDraft} disabled={skillSaving}>
               {skillSaving ? '저장 중' : '저장'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={resetSkillDraft} disabled={skillSaving}>
+              취소
             </Button>
           </div>
         </div>
@@ -546,11 +553,11 @@ export function SubAgentDetailView({
       {tab === 'instructions' && instructionsDirty && (
         <div className="border-border bg-background/95 fixed inset-x-0 bottom-0 z-30 border-t backdrop-blur-sm sm:hidden">
           <div className="flex items-center justify-end gap-2 px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
-            <Button variant="ghost" size="sm" onClick={resetInstructionsDraft}>
-              취소
-            </Button>
             <Button size="sm" onClick={saveInstructionsDraft}>
               저장
+            </Button>
+            <Button variant="ghost" size="sm" onClick={resetInstructionsDraft}>
+              취소
             </Button>
           </div>
         </div>
@@ -558,11 +565,11 @@ export function SubAgentDetailView({
       {tab === 'instructions' && instructionsDirty && (
         <div className="fixed right-6 bottom-6 z-30 hidden sm:block">
           <div className="bg-background/90 border-border flex items-center gap-2 rounded-lg border px-3 py-1.5 shadow-lg backdrop-blur-sm">
-            <Button variant="ghost" size="sm" onClick={resetInstructionsDraft}>
-              취소
-            </Button>
             <Button size="sm" onClick={saveInstructionsDraft}>
               저장
+            </Button>
+            <Button variant="ghost" size="sm" onClick={resetInstructionsDraft}>
+              취소
             </Button>
           </div>
         </div>
@@ -584,7 +591,6 @@ export function SubAgentDetailView({
           </AlertDialogHeader>
           {deleteError ? <p className="text-destructive text-sm">{deleteError}</p> : null}
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>취소</AlertDialogCancel>
             <Button variant="destructive" onClick={() => void handleDelete()} disabled={deleting}>
               {deleting ? (
                 <>
@@ -595,6 +601,7 @@ export function SubAgentDetailView({
                 '삭제'
               )}
             </Button>
+            <AlertDialogCancel disabled={deleting}>취소</AlertDialogCancel>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -685,6 +692,16 @@ function buildAgentRunItem(taskRun: RawTaskRun, rawEvents: RawTaskEventPayload[]
     typeof taskRun.progress_summary === 'string' ? taskRun.progress_summary : undefined
   const inputPayload = toRecord(taskRun.input_payload)
   const resultPayload = toRecord(taskRun.result_payload)
+  const resultMetadata = toRecord(resultPayload?.metadata)
+  const model =
+    getStringValue(inputPayload, 'model', 'provider_model', 'providerModel') ??
+    getStringValue(resultPayload, 'model') ??
+    getStringValue(resultMetadata, 'model') ??
+    undefined
+  const provider =
+    getStringValue(inputPayload, 'provider_name', 'providerName', 'provider') ??
+    getStringValue(resultPayload, 'provider_name', 'providerName', 'provider') ??
+    undefined
   const sortTime = getRunSortTime(taskRun, events)
 
   return {
@@ -697,8 +714,8 @@ function buildAgentRunItem(taskRun: RawTaskRun, rawEvents: RawTaskEventPayload[]
       compactText(progressSummary) ??
       compactText(summary.title) ??
       '아직 요약이 없습니다.',
-    adapter: 'openai',
-    model: getStringValue(inputPayload, 'model') ?? undefined,
+    adapter: getRunAdapterLabel(provider, model),
+    model,
     request:
       getStringValue(inputPayload, 'prompt', 'content', 'rawUserInput', 'raw_user_input') ??
       inputSummary,
@@ -791,6 +808,14 @@ function getStringValue(source: unknown, ...keys: string[]) {
     if (typeof value === 'string' && value.trim() !== '') return value.trim()
   }
   return undefined
+}
+
+function getRunAdapterLabel(provider?: string | null, model?: string | null) {
+  const providerText = (provider ?? '').trim().toLowerCase()
+  const modelText = (model ?? '').trim().toLowerCase()
+  if (providerText.includes('gemini') || modelText.startsWith('gemini-')) return 'gemini'
+  if (providerText.includes('openai') || modelText.startsWith('gpt-')) return 'openai'
+  return providerText || undefined
 }
 
 function buildDelegationInput(

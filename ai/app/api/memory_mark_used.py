@@ -9,6 +9,8 @@ from typing import Any, Protocol
 
 from app.api.memory_observation import MEMORY_CONTEXT_META_KEY
 from app.clients.backend_memory import BackendMemoryClientError
+from app.domain.orchestration.agent.memory.provider_retry import memory_provider_error_details
+from app.domain.orchestration.agent.memory.runtime_context import memory_provider_runtime_context_from_task_input
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ class MemoryUsageAttributionProvider(Protocol):
         user_query: str,
         assistant_message: str,
         recalled_memories: list[dict[str, Any]],
+        runtime_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return model-produced memory usage attribution JSON."""
 
@@ -80,6 +83,7 @@ class _AttributionResult:
     failed: bool = False
     fallback_reason: str | None = None
     latency_ms: int | None = None
+    error_details: dict[str, Any] | None = None
 
 
 class LlmMemoryUsageAttributionVerifier:
@@ -100,6 +104,7 @@ class LlmMemoryUsageAttributionVerifier:
         user_query: str,
         assistant_message: str,
         recalled_memories: list[_RecalledMemoryText],
+        runtime_context: dict[str, Any] | None = None,
     ) -> _AttributionResult:
         started_at = time.perf_counter()
         try:
@@ -109,6 +114,7 @@ class LlmMemoryUsageAttributionVerifier:
                     user_query=user_query,
                     assistant_message=assistant_message,
                     recalled_memories=[_memory_text_payload(memory) for memory in recalled_memories],
+                    runtime_context=runtime_context,
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -122,17 +128,20 @@ class LlmMemoryUsageAttributionVerifier:
                 failed=True,
                 fallback_reason="llm_attribution_timeout",
                 latency_ms=latency_ms,
+                error_details=_memory_provider_meta(self._provider),
             )
         except Exception as exc:
             latency_ms = _elapsed_ms(started_at)
             logger.warning("LLM memory usage attribution failed; falling back to heuristic", exc_info=True)
+            error_details = memory_provider_error_details(exc)
             return _AttributionResult(
                 scores={},
                 reasons={},
                 source="llm",
                 failed=True,
-                fallback_reason=f"llm_attribution_error:{type(exc).__name__}",
+                fallback_reason=_llm_attribution_fallback_reason(exc, error_details),
                 latency_ms=latency_ms,
+                error_details=error_details,
             )
         return _normalize_llm_attribution(
             raw,
@@ -176,6 +185,8 @@ async def mark_used_recalled_memories(
     llm_result = await _verify_used_memories_with_llm(
         app_state=app_state,
         input_payload=input_payload,
+        user_id=user_id,
+        task_run_id=task_run_id,
         assistant_message=answer,
         recalled_ids=recalled_ids,
         memory_texts=memory_texts,
@@ -272,6 +283,8 @@ async def _verify_used_memories_with_llm(
     *,
     app_state: Any,
     input_payload: dict[str, Any],
+    user_id: str,
+    task_run_id: str | None,
     assistant_message: str,
     recalled_ids: list[int],
     memory_texts: dict[int, _RecalledMemoryText],
@@ -289,6 +302,11 @@ async def _verify_used_memories_with_llm(
         user_query=user_query,
         assistant_message=assistant_message,
         recalled_memories=recalled_memories,
+        runtime_context=memory_provider_runtime_context_from_task_input(
+            input_payload,
+            user_id=user_id,
+            task_run_id=task_run_id,
+        ),
     )
 
 
@@ -362,6 +380,8 @@ def _put_attribution_meta(
         observation["attribution"]["llm_fallback_reason"] = llm_result.fallback_reason
     if llm_result.latency_ms is not None:
         observation["attribution"]["llm_latency_ms"] = llm_result.latency_ms
+    if llm_result.error_details:
+        observation["attribution"]["llm_error_details"] = dict(llm_result.error_details)
 
 
 def _recalled_memory_ids(input_payload: dict[str, Any]) -> list[int]:
@@ -457,6 +477,18 @@ def _has_direct_phrase(source_text: str, assistant_message: str) -> bool:
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, round((time.perf_counter() - started_at) * 1000))
+
+
+def _llm_attribution_fallback_reason(exc: BaseException, error_details: dict[str, Any]) -> str:
+    status_code = error_details.get("provider_status_code")
+    if isinstance(status_code, int):
+        return f"llm_attribution_http_error:{status_code}"
+    return f"llm_attribution_error:{type(exc).__name__}"
+
+
+def _memory_provider_meta(provider: Any) -> dict[str, Any]:
+    meta = getattr(provider, "last_memory_provider_meta", None)
+    return dict(meta) if isinstance(meta, dict) else {}
 
 
 def _skipped(reason: str, *, task_run_id: str | None, recalled_ids: list[int] | None = None) -> dict[str, Any]:

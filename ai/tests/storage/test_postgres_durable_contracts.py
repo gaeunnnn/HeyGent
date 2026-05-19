@@ -75,6 +75,48 @@ def test_in_memory_task_repository_claims_pending_tasks_atomically_by_state():
     assert claimed_again is None
 
 
+def test_in_memory_task_repository_does_not_claim_direct_tasks():
+    repository = InMemoryTaskRepository()
+    saved = repository.create_direct_task(
+        TaskRun(
+            task_run_id="task-direct-1",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session-1",
+            status="PENDING",
+        )
+    )
+
+    claimed = repository.claim_next_task(claim_owner="worker-a", lease_seconds=30)
+
+    assert saved.queue_status == "running"
+    assert saved.claim_owner is None
+    assert saved.attempts == 0
+    assert claimed is None
+
+
+def test_in_memory_task_repository_does_not_recover_stale_direct_tasks():
+    repository = InMemoryTaskRepository()
+    saved = repository.create_direct_task(
+        TaskRun(
+            task_run_id="task-direct-stale",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session-1",
+            status="PENDING",
+        )
+    )
+    repository.tasks[saved.task_run_id].updated_at = utc_now() - timedelta(minutes=20)
+
+    recovered = repository.recover_stale_task_runs(orphan_after_seconds=30)
+
+    assert recovered == []
+    direct = repository.get_task("task-direct-stale")
+    assert direct is not None
+    assert direct.status == "PENDING"
+    assert direct.queue_status == "running"
+
+
 def test_postgres_schema_contains_required_durable_tables():
     schema_sql = "\n".join(POSTGRES_SCHEMA_STATEMENTS)
 
@@ -88,6 +130,7 @@ def test_postgres_schema_contains_required_durable_tables():
         "worker_handoffs",
         "ai_agent_profiles",
         "ai_agent_templates",
+        "ai_agent_secret_values",
         "provider_oauth_states",
         "provider_tokens",
         "work_counters",
@@ -118,6 +161,8 @@ def test_postgres_schema_keeps_token_plaintext_out_of_durable_tables():
     assert "token_secret_ref TEXT NOT NULL" in schema_sql
     assert "refresh_secret_ref TEXT" in schema_sql
     assert "code_verifier_secret_ref TEXT" in schema_sql
+    assert "encrypted_value TEXT NOT NULL" in schema_sql
+    assert "UNIQUE (profile_id, document_key, section_key, secret_key)" in schema_sql
 
 
 def test_postgres_schema_contains_anchor_profile_and_worker_linkage_columns():
@@ -306,7 +351,8 @@ def test_postgres_schema_seeds_builtin_agent_profiles():
     assert "worker.default" in schema_sql
     assert "'worker'" in schema_sql
     assert "ON CONFLICT (owner_key, profile_key, profile_version) DO UPDATE" in schema_sql
-    assert '"web","browser"' in schema_sql
+    assert '"web"' in schema_sql
+    assert '"browser"' not in schema_sql
     assert '"hardTimeoutSeconds":900' in schema_sql
 
 
@@ -318,9 +364,22 @@ def test_postgres_migrations_refresh_existing_builtin_agent_profiles():
     assert "UPDATE ai_agent_profiles" in migration_sql
     assert "main.default" in migration_sql
     assert "worker.default" in migration_sql
-    assert '"web","browser"' in migration_sql
+    assert '"web"' in migration_sql
+    assert '"browser"' not in migration_sql
     assert '"maxIterations":80' in migration_sql
     assert '"hardTimeoutSeconds":900' in migration_sql
+
+
+def test_postgres_migrations_scrub_removed_browser_toolset_from_stored_settings():
+    migration_ids = [migration.migration_id for migration in POSTGRES_MIGRATIONS]
+    cleanup_migration = POSTGRES_MIGRATIONS[migration_ids.index("0019_remove_removed_browser_toolset")]
+    migration_sql = "\n".join(cleanup_migration.statements)
+
+    assert "UPDATE ai_agent_profiles" in migration_sql
+    assert "UPDATE agent_sessions" in migration_sql
+    assert "to_jsonb('browser'::text)" in migration_sql
+    assert "config_snapshot->'toolsets' @> '[\"browser\"]'::jsonb" in migration_sql
+    assert "settings->'toolsets' @> '[\"browser\"]'::jsonb" in migration_sql
 
 
 class _FakeCursor:
@@ -679,6 +738,29 @@ def test_postgres_task_repository_copies_task_settings_to_run_anchor_config_snap
     }
 
 
+def test_postgres_task_repository_marks_direct_pending_task_as_non_claimable_running_anchor():
+    connection = _FakeDurableConnection()
+    repository = PostgresTaskRepository(lambda: connection)
+
+    repository.create_direct_task(
+        TaskRun(
+            task_run_id="task_pg_direct_anchor",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session_pg_direct",
+            status="PENDING",
+        )
+    )
+
+    anchor = repository.get_run_anchor("task_pg_direct_anchor")
+    assert anchor is not None
+    assert anchor["queue_status"] == "running"
+    assert anchor["claim_owner"] is None
+    assert anchor["attempts"] == 0
+    assert anchor["anchor_payload"]["task"]["status"] == "PENDING"
+    assert anchor["anchor_payload"]["task"]["queue_status"] == "running"
+
+
 def test_postgres_task_repository_marks_completed_claim_as_terminal():
     connection = _FakeDurableConnection()
     repository = PostgresTaskRepository(lambda: connection)
@@ -715,7 +797,7 @@ def test_postgres_task_repository_recovers_stale_running_task_as_terminal():
         session_key="session_pg_stale",
         status="RUNNING",
         queue_status="running",
-        claim_owner=None,
+        claim_owner="worker-a",
     )
     repository.create_task(task)
     old_updated_at = utc_now() - timedelta(minutes=20)

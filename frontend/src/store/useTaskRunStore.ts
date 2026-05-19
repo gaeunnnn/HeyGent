@@ -39,6 +39,7 @@ type TaskRunState = {
   recoveryAfterSequenceByTaskRunId: Record<string, number | undefined>
   recoveringByTaskRunId: Record<string, boolean>
   approvalSubmissionIdsByApprovalId: Record<string, string>
+  subscribedChildTaskRunIds: Record<string, true>
   lastError: string | null
   fetchActiveTaskRuns: (sessionId?: string) => Promise<RawTaskRun[]>
   fetchSessionTaskRuns: (sessionId: string) => Promise<RawTaskRun[]>
@@ -71,6 +72,7 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
   recoveryAfterSequenceByTaskRunId: {},
   recoveringByTaskRunId: {},
   approvalSubmissionIdsByApprovalId: {},
+  subscribedChildTaskRunIds: {},
   lastError: null,
   fetchActiveTaskRuns: async (sessionId) => {
     const frame = await useAiRealtimeStore
@@ -96,6 +98,13 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
     }
 
     mergeSnapshot(snapshot, set)
+
+    // 스냅샷 이벤트에서 child TaskRun을 발견하면 자동 구독한다 (재접속 복구용).
+    const snapshotEvents = Array.isArray(snapshot.events)
+      ? snapshot.events.filter(isRawTaskEventPayload)
+      : []
+    subscribeChildTaskRunsFromEvents(snapshotEvents, get, set)
+
     return snapshot
   },
   replayEvents: async (taskRunId, afterSequence) => {
@@ -106,6 +115,7 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
     const events = getRawTaskEventList(payload)
 
     mergeReplayResult(taskRunId, events, payload, set)
+    subscribeChildTaskRunsFromEvents(events, get, set)
 
     return events
   },
@@ -132,6 +142,7 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
       const retentionExceeded = getBooleanField(payload, 'retention_exceeded', 'retentionExceeded')
 
       mergeReplayResult(taskRunId, events, payload, set)
+      subscribeChildTaskRunsFromEvents(events, get, set)
 
       if (retentionExceeded) {
         // replay 보관 구간을 벗어난 경우에는 event 전체 복구가 불가능하므로 snapshot으로 현재 상태를 맞춘다.
@@ -239,6 +250,11 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
     }
   },
   mergeTaskEvent: (event) => {
+    // step.updated 이벤트의 payload에서 childTaskRunId를 추출한다 — live event 기준.
+    const childTaskRunId = getChildTaskRunId(event)
+    const shouldSubscribeChild =
+      childTaskRunId !== null && get().subscribedChildTaskRunIds[childTaskRunId] === undefined
+
     set((state) => {
       const currentEvents = state.eventsByTaskRunId[event.task_run_id] ?? []
       const mergeResult = mergeTaskRunEvents(currentEvents, [event])
@@ -297,8 +313,23 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
                 [event.task_run_id]: mergeResult.expectedSequence - 1,
               }
             : state.recoveryAfterSequenceByTaskRunId,
+        subscribedChildTaskRunIds: shouldSubscribeChild
+          ? { ...state.subscribedChildTaskRunIds, [childTaskRunId!]: true }
+          : state.subscribedChildTaskRunIds,
       }
     })
+
+    // set() 이후 비동기 구독 — WebSocket이 준비되지 않으면 무시하고 재접속 시 복구한다.
+    if (shouldSubscribeChild && childTaskRunId !== null) {
+      try {
+        useAiRealtimeStore.getState().subscribeTask(childTaskRunId)
+      } catch {
+        // 소켓 미준비 상태 — 재접속 후 snapshot/replay로 복구됨
+      }
+      void get()
+        .fetchSnapshot(childTaskRunId)
+        .catch(() => {})
+    }
   },
   clearTaskRunState: () =>
     set({
@@ -312,6 +343,7 @@ export const useTaskRunStore = create<TaskRunState>((set, get) => ({
       recoveryAfterSequenceByTaskRunId: {},
       recoveringByTaskRunId: {},
       approvalSubmissionIdsByApprovalId: {},
+      subscribedChildTaskRunIds: {},
       lastError: null,
     }),
 }))
@@ -1136,3 +1168,48 @@ const isRawTaskEventPayload = (value: unknown): value is RawTaskEventPayload =>
   typeof value.event_id === 'string' &&
   typeof value.event_type === 'string' &&
   typeof value.task_run_id === 'string'
+
+// step.updated 이벤트의 payload에서 childTaskRunId를 추출한다.
+// camelCase와 snake_case 모두 처리한다.
+const getChildTaskRunId = (event: RawTaskEventPayload): string | null => {
+  if (event.event_type !== 'step.updated' || !isJsonObject(event.payload)) return null
+  const id = event.payload.childTaskRunId ?? event.payload.child_task_run_id
+  return typeof id === 'string' && id !== '' ? id : null
+}
+
+// 이벤트 목록에서 미구독 child TaskRun을 찾아 구독하고 snapshot을 가져온다.
+// fetchSnapshot이 재귀 호출될 수 있으나 subscribedChildTaskRunIds로 중복을 방지한다.
+const subscribeChildTaskRunsFromEvents = (
+  events: RawTaskEventPayload[],
+  get: () => TaskRunState,
+  set: (partial: Partial<TaskRunState> | ((state: TaskRunState) => Partial<TaskRunState>)) => void,
+) => {
+  const subscribedIds = get().subscribedChildTaskRunIds
+  const newChildIds = [
+    ...new Set(
+      events
+        .map(getChildTaskRunId)
+        .filter((id): id is string => id !== null && subscribedIds[id] === undefined),
+    ),
+  ]
+
+  if (newChildIds.length === 0) return
+
+  set((state) => ({
+    subscribedChildTaskRunIds: {
+      ...state.subscribedChildTaskRunIds,
+      ...Object.fromEntries(newChildIds.map((id) => [id, true as const])),
+    },
+  }))
+
+  for (const childId of newChildIds) {
+    try {
+      useAiRealtimeStore.getState().subscribeTask(childId)
+    } catch {
+      // 소켓 미준비 — 재접속 후 snapshot/replay로 복구됨
+    }
+    void get()
+      .fetchSnapshot(childId)
+      .catch(() => {})
+  }
+}

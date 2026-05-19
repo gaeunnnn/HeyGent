@@ -2,6 +2,10 @@ package com.ssafy.heygent.domain.ai.openai.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -18,6 +22,7 @@ import com.ssafy.heygent.domain.ai.dto.request.OpenAiCredentialIssueRequest;
 import com.ssafy.heygent.domain.ai.dto.response.OpenAiCredentialIssueResponse;
 import com.ssafy.heygent.domain.ai.openai.config.OpenAiProperties;
 import com.ssafy.heygent.global.exception.CustomException;
+import com.ssafy.heygent.global.exception.ErrorCode;
 
 @ExtendWith(MockitoExtension.class)
 class OpenAiCredentialIssueServiceTest {
@@ -37,7 +42,7 @@ class OpenAiCredentialIssueServiceTest {
     void setUp() {
         OpenAiProperties properties = new OpenAiProperties();
         properties.setApiKey("dev-key");
-        properties.setAllowedModels(List.of("gpt-5.4"));
+        properties.setAllowedModels(List.of("gpt-5.4", "gpt-5.4-mini", "gpt-5.2"));
         OpenAiRuntimePolicyService runtimePolicyService = new OpenAiRuntimePolicyService(properties, environment);
         openAiCredentialIssueService = new OpenAiCredentialIssueService(
             properties,
@@ -50,25 +55,32 @@ class OpenAiCredentialIssueServiceTest {
     @Test
     void issueReturnsUserApiKeyCredential() throws Exception {
         OpenAiCredentialIssueRequest request = request("openai_api_key");
-        when(openAiApiKeyService.resolveApiKey(
-            org.mockito.ArgumentMatchers.eq(1L),
-            org.mockito.ArgumentMatchers.any()
-        )).thenReturn("user-key");
+        when(openAiApiKeyService.resolveApiKey(eq(1L), any())).thenReturn("user-key");
 
         OpenAiCredentialIssueResponse response = openAiCredentialIssueService.issue(request);
 
         assertThat(response.getProviderName()).isEqualTo("openai_api_key");
         assertThat(response.getCredentialType()).isEqualTo("api_key");
         assertThat(response.getCredential()).isEqualTo("user-key");
+        verify(openAiApiKeyService).resolveApiKey(eq(1L), any());
+    }
+
+    @Test
+    void issueAllowsGpt52ForUserApiKeyCredential() throws Exception {
+        OpenAiCredentialIssueRequest request = request("openai_api_key", "gpt-5.2");
+        when(openAiApiKeyService.resolveApiKey(eq(1L), any())).thenReturn("user-key");
+
+        OpenAiCredentialIssueResponse response = openAiCredentialIssueService.issue(request);
+
+        assertThat(response.getProviderName()).isEqualTo("openai_api_key");
+        assertThat(response.getModel()).isEqualTo("gpt-5.2");
+        verify(openAiApiKeyService).resolveApiKey(eq(1L), any());
     }
 
     @Test
     void issueReturnsGeminiApiKeyCredential() throws Exception {
         OpenAiCredentialIssueRequest request = request("gemini_api_key", "gemini-2.5-pro");
-        when(openAiApiKeyService.resolveApiKey(
-            org.mockito.ArgumentMatchers.eq(1L),
-            org.mockito.ArgumentMatchers.any()
-        )).thenReturn("gemini-key");
+        when(openAiApiKeyService.resolveApiKey(eq(1L), any())).thenReturn("gemini-key");
 
         OpenAiCredentialIssueResponse response = openAiCredentialIssueService.issue(request);
 
@@ -76,6 +88,32 @@ class OpenAiCredentialIssueServiceTest {
         assertThat(response.getAuthType()).isEqualTo("api_key");
         assertThat(response.getCredentialType()).isEqualTo("api_key");
         assertThat(response.getCredential()).isEqualTo("gemini-key");
+    }
+
+    @Test
+    void issueDoesNotUseDevFallbackWhenOpenAiUserApiKeyIsMissingInLocalProfile() throws Exception {
+        OpenAiCredentialIssueRequest request = request("openai_api_key");
+        when(openAiApiKeyService.resolveApiKey(eq(1L), any()))
+            .thenThrow(new CustomException(ErrorCode.OPENAI_PROVIDER_NOT_CONNECTED));
+
+        assertThatThrownBy(() -> openAiCredentialIssueService.issue(request))
+            .isInstanceOf(CustomException.class)
+            .hasFieldOrPropertyWithValue("errorCode", ErrorCode.OPENAI_PROVIDER_NOT_CONNECTED);
+        verify(openAiApiKeyService).resolveApiKey(eq(1L), any());
+    }
+
+    @Test
+    void issueUsesDevFallbackOnlyWhenExplicitProviderIsRequested() throws Exception {
+        OpenAiCredentialIssueRequest request = request("openai_dev_fallback");
+        when(environment.matchesProfiles("dev")).thenReturn(false);
+        when(environment.matchesProfiles("local")).thenReturn(true);
+
+        OpenAiCredentialIssueResponse response = openAiCredentialIssueService.issue(request);
+
+        assertThat(response.getProviderName()).isEqualTo("openai_dev_fallback");
+        assertThat(response.getCredentialType()).isEqualTo("api_key");
+        assertThat(response.getCredential()).isEqualTo("dev-key");
+        verify(openAiApiKeyService, never()).resolveApiKey(any(), any());
     }
 
     @Test

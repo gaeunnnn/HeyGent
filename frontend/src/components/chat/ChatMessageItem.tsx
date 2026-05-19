@@ -21,6 +21,7 @@ type ChatMessageItemProps = {
   stepRuns?: RawStepRun[]
   taskRunSummary?: TaskRunSummaryView
   onOpenTaskRun?: (taskRunId: string) => void
+  assistantName?: string
 }
 
 export function ChatMessageItem({
@@ -29,6 +30,7 @@ export function ChatMessageItem({
   stepRuns = [],
   taskRunSummary,
   onOpenTaskRun,
+  assistantName,
 }: ChatMessageItemProps) {
   const isUser = message.role === 'user'
   const taskStatus =
@@ -46,24 +48,31 @@ export function ChatMessageItem({
   const taskRunProgress = showTaskRunProgress
     ? getAssistantTaskRunProgress(stepRuns, taskRunSummary)
     : undefined
+  // 메시지 본문이 비어 있고 어시스턴트의 진행 표시(progress 또는 chip)가 있을 땐
+  // 본문 자리의 단순 로딩 스피너를 숨기고, 진행 상태 자체가 그 자리에 보이도록 한다.
+  const hasAssistantProgressIndicator = !isUser && (taskRunProgress || taskRunChip)
   const shouldShowMessageBody =
     message.content.trim() !== '' ||
     isUser ||
-    (!isTerminalTaskStatus(taskStatus) && !taskRunProgress)
+    (!isTerminalTaskStatus(taskStatus) && !hasAssistantProgressIndicator)
 
   return (
     <article className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}>
       {!isUser && (
         <div className="mt-1 h-8 w-8 shrink-0 overflow-hidden rounded-full">
           <img
-            src="/assets/agents/ceo/ceo_profile.png"
-            alt="AI 어시스턴트"
+            src="/assets/agents/ceo/ceo_profile_img.png"
+            alt={assistantName?.trim() || '팀장 에이전트'}
             className="h-full w-full object-cover"
           />
         </div>
       )}
       <div className={`max-w-[78%] space-y-1 ${isUser ? 'items-end' : 'items-start'}`}>
-        {!isUser && <p className="text-muted-foreground px-1 text-xs font-medium">AI 어시스턴트</p>}
+        {!isUser && (
+          <p className="text-muted-foreground px-1 text-xs font-medium">
+            {assistantName?.trim() || '팀장 에이전트'}
+          </p>
+        )}
         {shouldShowMessageBody && (
           <div
             className={

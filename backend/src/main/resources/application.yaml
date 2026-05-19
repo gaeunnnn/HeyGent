@@ -62,6 +62,7 @@ ai:
   internal:
     token: ${AI_INTERNAL_TOKEN:}
     online-users-url: ${AI_INTERNAL_ONLINE_USERS_URL:http://ai:8000/ai/api/v1/internal/bridge/online-users}
+    credential-cache-invalidate-url: ${AI_INTERNAL_CREDENTIAL_CACHE_INVALIDATE_URL:http://ai:8000/ai/api/v1/internal/ai/credential-cache/invalidate}
 
 iot:
   mqtt:
@@ -90,7 +91,7 @@ openai:
   rest-api-base-url: ${OPENAI_REST_API_BASE_URL:https://api.openai.com/v1}
   usage-api-base-url: ${OPENAI_USAGE_API_BASE_URL:https://api.openai.com/v1}
   default-model: ${OPENAI_DEFAULT_MODEL:gpt-5.4}
-  allowed-models: ${OPENAI_ALLOWED_MODELS:gpt-5.4,gpt-5.4-mini}
+  allowed-models: ${OPENAI_ALLOWED_MODELS:gpt-5.4,gpt-5.4-mini,gpt-5.2}
   embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
   timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:60}
   credential-encryption-key: ${OPENAI_CREDENTIAL_ENCRYPTION_KEY:}

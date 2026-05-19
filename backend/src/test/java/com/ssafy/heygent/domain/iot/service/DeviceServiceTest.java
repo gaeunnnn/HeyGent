@@ -35,7 +35,7 @@ import java.util.Optional;
 class DeviceServiceTest {
 
     private static final Long USER_ID = 1L;
-    private static final String DEVICE_ID = "esp32c3-oled-001";
+    private static final String DEVICE_ID = "heygent-c3-a1b2c3";
 
     @Mock
     private IotDeviceRepository iotDeviceRepository;
@@ -120,7 +120,7 @@ class DeviceServiceTest {
         DisplayPublishTestRequest request = request();
         DisplayEventPayload payload = payload();
         DisplayPublishResult expected = DisplayPublishResult.published(
-            "devices/esp32c3-oled-001/display",
+            "devices/heygent-c3-a1b2c3/display",
             0,
             payload
         );

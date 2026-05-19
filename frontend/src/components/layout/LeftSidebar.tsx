@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router'
 import {
   Building2,
@@ -36,7 +36,11 @@ import {
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { NewSessionModal, type CustomAgentConfig } from '@/components/session/NewSessionModal'
 import { defaultAgentSessionConfig } from '@/components/session/defaultAgentSession'
-import { getCurrentWorkspaceSessionId } from '@/components/sessionWorkspace/sessionWorkspaceUtils'
+import {
+  getCurrentWorkspaceSessionId,
+  getString,
+  toJsonObject,
+} from '@/components/sessionWorkspace/sessionWorkspaceUtils'
 import { getSessionTime, isRemovedSidebarSession } from './sessionListUtils'
 import { DEFAULT_SIDEBAR_COLLAPSED_WIDTH, useUIStore } from '@/store/useUIStore'
 import { useSessionStore } from '@/store/useSessionStore'
@@ -81,7 +85,6 @@ export function LeftSidebar() {
   const [newSessionModalOpen, setNewSessionModalOpen] = useState(false)
   const [newSessionCreating, setNewSessionCreating] = useState(false)
   const [newSessionError, setNewSessionError] = useState<string | null>(null)
-  const commandClient = useAiRealtimeStore((state) => state.commandClient)
   const realtimeStatus = useAiRealtimeStore((state) => state.connectionStatus)
   const sessionsById = useChatStore((state) => state.sessionsById)
   const messagesBySessionId = useChatStore((state) => state.messagesBySessionId)
@@ -104,13 +107,8 @@ export function LeftSidebar() {
     return [...pinned, ...unpinned]
   }, [messagesBySessionId, pinnedSessionIds, sessionsById, taskRunsById])
 
-  useEffect(() => {
-    if (commandClient === null) {
-      return
-    }
-
-    void fetchSessions().catch(() => undefined)
-  }, [commandClient, fetchSessions])
+  // fetchSessions 호출은 AiRealtimeProvider 의 auth.ok 핸들러가 단독으로 담당.
+  // LeftSidebar 에서 또 호출하면 같은 명령이 2회 발사돼 사이드바 로드가 두 배 느려진다.
 
   const createDefaultAgentSession = (config: CustomAgentConfig) => {
     setNewSessionCreating(true)
@@ -290,7 +288,7 @@ export function LeftSidebar() {
                 type="button"
                 onClick={() => handleOpenPrimaryRoute('/agent-status')}
                 className="flex h-12 w-12 items-center justify-center rounded-xl"
-                aria-label="에이전트 상태로 이동"
+                aria-label="내 사무실로 이동"
               >
                 <img
                   src="/img_logo_light.png"
@@ -307,7 +305,7 @@ export function LeftSidebar() {
 
             <div className="bg-border my-1 h-px w-10" />
 
-            <CollapsedTooltip label="에이전트 상태">
+            <CollapsedTooltip label="내 사무실">
               <button
                 type="button"
                 onClick={() => handleOpenPrimaryRoute('/agent-status')}
@@ -316,7 +314,7 @@ export function LeftSidebar() {
                     ? 'bg-accent text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
-                aria-label="에이전트 상태로 이동"
+                aria-label="내 사무실로 이동"
               >
                 <Building2 className="h-5 w-5" />
               </button>
@@ -351,16 +349,22 @@ export function LeftSidebar() {
                 disabled={newSessionCreating}
                 className="text-muted-foreground hover:bg-accent/50 hover:text-foreground flex h-12 w-12 items-center justify-center rounded-xl transition-colors disabled:opacity-50"
               >
-                {newSessionCreating ? (
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                ) : (
-                  <Plus className="h-5 w-5" />
-                )}
+                <Plus className="h-5 w-5" />
               </button>
             </CollapsedTooltip>
 
             <div className="min-h-0 w-full flex-1 overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <div className="flex flex-col items-center gap-1.5">
+                {newSessionCreating && (
+                  <CollapsedTooltip label="새 세션을 만드는 중...">
+                    <div
+                      aria-label="새 세션을 만드는 중"
+                      className="bg-accent/30 text-muted-foreground flex h-12 w-12 items-center justify-center rounded-xl"
+                    >
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    </div>
+                  </CollapsedTooltip>
+                )}
                 {sidebarSessions.map((session) => (
                   <CollapsedTooltip key={session.id} label={session.title}>
                     <button
@@ -435,7 +439,7 @@ export function LeftSidebar() {
                 type="button"
                 onClick={() => handleOpenPrimaryRoute('/agent-status')}
                 className="flex h-full w-full min-w-0 items-center justify-center rounded-lg p-0"
-                aria-label="에이전트 상태로 이동"
+                aria-label="내 사무실로 이동"
               >
                 <img
                   src="/text_logo_light.png"
@@ -462,7 +466,7 @@ export function LeftSidebar() {
                   }`}
                 >
                   <Building2 className="h-5 w-5 shrink-0" />
-                  <span>에이전트 상태</span>
+                  <span>내 사무실</span>
                 </button>
                 <button
                   type="button"
@@ -494,18 +498,24 @@ export function LeftSidebar() {
                     title="클릭하면 기본 에이전트로 새 세션이 시작됩니다. 길게 누르면 옵션을 선택할 수 있어요."
                     className="text-muted-foreground hover:bg-accent/50 hover:text-foreground flex w-full items-center gap-3 rounded-lg px-2.5 py-2.5 text-left text-sm font-medium transition-colors disabled:opacity-50"
                   >
-                    {newSessionCreating ? (
-                      <Loader2 className="text-muted-foreground h-5 w-5 shrink-0 animate-spin" />
-                    ) : (
-                      <Plus className="text-muted-foreground h-5 w-5 shrink-0" />
-                    )}
-                    <span className="text-muted-foreground truncate text-sm">
-                      {newSessionCreating ? '세션을 만드는 중...' : '새 세션'}
-                    </span>
+                    <Plus className="text-muted-foreground h-5 w-5 shrink-0" />
+                    <span className="text-muted-foreground truncate text-sm">새 세션</span>
                   </button>
                 </div>
                 <div className="mt-0.5 min-h-0 flex-1 overflow-x-hidden overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                   <div className="flex flex-col gap-0.5">
+                    {newSessionCreating && (
+                      <div
+                        aria-label="새 세션을 만드는 중"
+                        className="text-muted-foreground bg-accent/30 flex w-full items-center gap-3 rounded-lg px-2.5 py-2.5 text-sm"
+                      >
+                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="bg-muted-foreground/20 h-3 w-2/3 animate-pulse rounded" />
+                          <div className="bg-muted-foreground/15 h-2 w-1/2 animate-pulse rounded" />
+                        </div>
+                      </div>
+                    )}
                     {sidebarSessions.map((session) => {
                       const isActive = currentWorkspaceSessionId === session.id
                       const isPinned = pinnedSessionIds.has(session.id)
@@ -644,7 +654,12 @@ function toSidebarSession(
   messages: ChatMessageView[],
   taskRunsById: Record<string, RawTaskRun>,
 ): SidebarSession {
+  // 세션 워크스페이스 메뉴에서 이름을 수정하면 metadata.ui.sessionName에 저장되므로,
+  // 사이드바도 동일한 우선순위(metadata.ui.sessionName → session.title → session_key)로 표시한다.
+  const metadata = toJsonObject(session.metadata)
+  const uiMetadata = toJsonObject(metadata.ui)
   const title =
+    getString(uiMetadata, 'sessionName') ??
     getStringValue(session.title) ??
     getStringValue(session.session_key) ??
     `세션 ${session.session_id}`
@@ -963,7 +978,6 @@ function ProfileMenu({
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel disabled={isLoggingOut}>취소</AlertDialogCancel>
               <AlertDialogAction
                 disabled={isLoggingOut}
                 onClick={() => void handleConfirmLogout()}
@@ -971,6 +985,7 @@ function ProfileMenu({
               >
                 {isLoggingOut ? '로그아웃 중...' : '로그아웃'}
               </AlertDialogAction>
+              <AlertDialogCancel disabled={isLoggingOut}>취소</AlertDialogCancel>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>

@@ -1,17 +1,17 @@
 import json
 import sys
-import types
 from copy import deepcopy
 
-from app.domain.work.models import WorkComment, WorkItem, WorkRelation
+from app.domain.work.models import WorkComment, WorkItem, WorkRelation, WorkRunLink
 from app.domain.orchestration.prompts.skill_prompt import SkillLoader, SkillRegistry
+from app.domain.orchestration.agent.tool_result_store import store_raw_tool_result
 from app.domain.orchestration.runtime_planning.todo_state import (
     apply_tool_results_to_todo_state,
     build_task_todo_payload,
 )
 from app.tools.file import file_tools
 from app.tools.runtime.local_tool_runtime import LocalToolRuntime
-from app.tools.runtime.toolsets import resolve_runtime_tool_names
+from app.tools.runtime.toolsets import list_runtime_toolsets, resolve_runtime_tool_names
 
 
 class DummySessionStore:
@@ -21,8 +21,10 @@ class DummySessionStore:
 class FakeRuntimeWorkRepository:
     def __init__(self) -> None:
         self.items: dict[str, WorkItem] = {}
+        self.client_request_ids: dict[tuple[str, str], str] = {}
         self.comments: list[WorkComment] = []
         self.relations: list[WorkRelation] = []
+        self.runs: dict[tuple[str, str], WorkRunLink] = {}
         self.next_number = 1
 
     def next_identifier(self, session_id: str) -> str:
@@ -32,6 +34,8 @@ class FakeRuntimeWorkRepository:
     def create_work(self, work: WorkItem, *, client_request_id: str | None = None) -> WorkItem:
         saved = deepcopy(work)
         self.items[saved.work_id] = saved
+        if client_request_id:
+            self.client_request_ids[(saved.session_id, client_request_id)] = saved.work_id
         return saved
 
     def get_work(self, work_id: str) -> WorkItem | None:
@@ -42,7 +46,8 @@ class FakeRuntimeWorkRepository:
         session_id: str,
         client_request_id: str,
     ) -> WorkItem | None:
-        return None
+        work_id = self.client_request_ids.get((session_id, client_request_id))
+        return self.items.get(work_id) if work_id else None
 
     def set_label_links_by_names(
         self,
@@ -65,6 +70,15 @@ class FakeRuntimeWorkRepository:
         work = self.items[work_id]
         self.items[work_id] = WorkItem(**{**_work_dict(work), "status": status})
         return self.items[work_id]
+
+    def link_run(self, work_id: str, task_run_id: str, *, run_kind: str, status: str) -> WorkRunLink:
+        link = WorkRunLink(work_id=work_id, task_run_id=task_run_id, run_kind=run_kind, status=status)
+        self.runs[(work_id, task_run_id)] = link
+        active_run_id = None if status in {"COMPLETED", "FAILED", "CANCELED"} else task_run_id
+        work = self.items[work_id]
+        if work.active_run_id is None or work.active_run_id == task_run_id:
+            self.items[work_id] = WorkItem(**{**_work_dict(work), "active_run_id": active_run_id, "latest_run_id": task_run_id})
+        return link
 
     def add_relation(
         self,
@@ -114,15 +128,9 @@ def test_runtime_exposes_todo_schema_without_legacy_write_name():
     definitions = runtime.list_tool_definitions(enabled_toolsets=("planning",))
 
     schema_by_name = {definition["name"]: definition["schema"] for definition in definitions}
-    assert [definition["name"] for definition in definitions] == ["step", "todo"]
+    assert [definition["name"] for definition in definitions] == ["todo"]
     assert schema_by_name["todo"]["name"] == "todo"
     assert "todos" in schema_by_name["todo"]["parameters"]["properties"]
-    assert schema_by_name["step"]["name"] == "step"
-    assert "steps" in schema_by_name["step"]["parameters"]["properties"]
-    title_description = schema_by_name["step"]["parameters"]["properties"]["steps"]["items"]["properties"]["title"]["description"]
-    assert "target/topic/artifact" in title_description
-    assert "뉴스 출처 근거 조사" in title_description
-    assert "기존 자료 파악" in title_description
 
 
 def test_runtime_exposes_terminal_argument_schema():
@@ -178,18 +186,58 @@ def test_file_toolset_is_available_for_coding_and_local_core_but_not_safe():
     assert file_tool_names.isdisjoint(resolve_runtime_tool_names(("safe",)))
 
 
-def test_runtime_exposes_heygent_web_tool_definitions():
+def test_runtime_exposes_heygent_web_tool_definitions(monkeypatch):
     runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
 
     definitions = runtime.list_tool_definitions(enabled_toolsets=("web",))
 
-    assert [definition["name"] for definition in definitions] == ["http_get", "web_crawl", "web_extract", "web_search"]
+    assert [definition["name"] for definition in definitions] == ["http_get"]
     schema_by_name = {definition["name"]: definition["schema"] for definition in definitions}
     assert schema_by_name["http_get"]["parameters"]["properties"]["url"]["type"] == "string"
-    assert schema_by_name["web_search"]["parameters"]["properties"]["query"]["type"] == "string"
-    assert "skills.read" not in schema_by_name["web_search"]["description"]
-    assert schema_by_name["web_extract"]["parameters"]["properties"]["urls"]["items"]["type"] == "string"
-    assert schema_by_name["web_crawl"]["parameters"]["properties"]["url"]["type"] == "string"
+
+
+def test_runtime_exposes_tool_result_reader_only_for_tool_result_toolset():
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
+
+    definitions = runtime.list_tool_definitions(enabled_toolsets=("tool-result",))
+
+    assert [definition["name"] for definition in definitions] == ["tool_result.read"]
+    assert resolve_runtime_tool_names(("tool-result",)) == {"tool_result.read"}
+    assert "tool_result.read" not in resolve_runtime_tool_names(("web",))
+    assert "tool_result.read" not in resolve_runtime_tool_names(("local-core",))
+
+
+def test_runtime_executes_tool_result_reader(monkeypatch, tmp_path):
+    monkeypatch.setenv("HEYGENT_TOOL_RESULT_STORE_DIR", str(tmp_path / "tool-results"))
+    raw_meta = store_raw_tool_result(
+        tool_name="http_get",
+        tool_call_id="call_raw",
+        task_run_id="task_raw",
+        result={"ok": True, "content": "x" * 25_000},
+    )
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
+
+    result = runtime.run_call(
+        name="tool_result.read",
+        args={"raw_ref": raw_meta["raw_ref"], "offset": 0, "limit": 600},
+        enabled_toolsets=("tool-result",),
+    )
+
+    assert result["ok"] is True
+    assert result["raw_ref"] == raw_meta["raw_ref"]
+    assert result["returned_chars"] == 600
+    assert result["has_more"] is True
+    assert len(result["content"]) == 600
+
+
+def test_runtime_does_not_expose_removed_web_search_tool(monkeypatch):
+    for key in ("EXA_API_KEY", "PARALLEL_API_KEY", "TAVILY_API_KEY", "OPENAI_API_KEY", "HEYGENT_OPENAI_API_KEY"):
+        monkeypatch.setenv(key, "test-key")
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
+
+    definitions = runtime.list_tool_definitions(enabled_toolsets=("web",))
+
+    assert [definition["name"] for definition in definitions] == ["http_get"]
 
 
 def test_runtime_exposes_notion_execute_only_for_notion_toolset():
@@ -288,57 +336,38 @@ def test_disabled_skill_readers_are_unavailable_even_with_enabled_skill_context(
     assert file_result["error"]["code"] == "skill_disabled"
 
 
-def test_runtime_exposes_heygent_browser_tool_definitions():
-    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
-
-    definitions = runtime.list_tool_definitions(enabled_toolsets=("browser",))
-
-    names = [definition["name"] for definition in definitions]
-    assert "browser_navigate" in names
-    assert "browser_snapshot" in names
-    assert "browser_click" in names
-    assert "browser_cdp" in names
-    schema_by_name = {definition["name"]: definition["schema"] for definition in definitions}
-    assert schema_by_name["browser_navigate"]["parameters"]["properties"]["url"]["type"] == "string"
-    assert schema_by_name["browser_click"]["parameters"]["properties"]["ref"]["type"] == "string"
-
-
-def test_web_browser_runtime_defaults_use_tolerant_timeouts():
-    from app.tools.web_runtime import browser_camofox, browser_tool
-    from app.tools.web_runtime.browser_providers import browser_use
-
-    assert browser_tool.DEFAULT_COMMAND_TIMEOUT == 180
-    assert browser_camofox._DEFAULT_TIMEOUT == 90
-    assert browser_use._DEFAULT_MANAGED_TIMEOUT_MINUTES == 10
-
-
-def test_web_is_available_in_local_core_and_safe_but_browser_is_explicit():
-    assert {"web_search", "web_extract", "web_crawl", "http_get"} <= resolve_runtime_tool_names(("web",))
-    assert {"web_search", "web_extract", "web_crawl", "http_get"} <= resolve_runtime_tool_names(("local-core",))
-    assert {"web_search", "web_extract", "web_crawl", "http_get"} <= resolve_runtime_tool_names(("safe",))
-    assert "browser_navigate" in resolve_runtime_tool_names(("browser",))
+def test_web_is_available_in_local_core_and_safe_without_removed_extract_or_browser_tools():
+    assert resolve_runtime_tool_names(("web",)) == {"http_get"}
+    assert "http_get" in resolve_runtime_tool_names(("local-core",))
+    assert "http_get" in resolve_runtime_tool_names(("safe",))
+    assert "web_search" not in resolve_runtime_tool_names(("web",))
+    assert "web_search" not in resolve_runtime_tool_names(("local-core",))
+    assert "web_search" not in resolve_runtime_tool_names(("safe",))
+    assert "web_extract" not in resolve_runtime_tool_names(("web",))
+    assert "web_crawl" not in resolve_runtime_tool_names(("web",))
+    assert "browser" not in list_runtime_toolsets()
     assert "browser_navigate" not in resolve_runtime_tool_names(("local-core",))
+    assert "browser_navigate" not in resolve_runtime_tool_names(("safe",))
 
 
-def test_web_runtime_invokes_heygent_web_tool(monkeypatch):
-    fake_module = types.ModuleType("app.tools.web_runtime.web_tools")
+def test_runtime_ignores_stale_or_unknown_toolsets():
+    resolved = resolve_runtime_tool_names(("web", "browser", "unknown-toolset", ""))
 
-    def fake_web_search_tool(query, limit=5):
-        return json.dumps({"success": True, "data": {"web": [{"title": query, "url": "https://example.com"}]}, "limit": limit})
+    assert "http_get" in resolved
+    assert "web_search" not in resolved
+    assert "browser_navigate" not in resolved
 
-    fake_module.web_search_tool = fake_web_search_tool
-    monkeypatch.setitem(sys.modules, "app.tools.web_runtime.web_tools", fake_module)
+
+def test_runtime_tool_availability_omits_removed_search_tool(monkeypatch):
+    for key in ("EXA_API_KEY", "PARALLEL_API_KEY", "TAVILY_API_KEY", "OPENAI_API_KEY", "HEYGENT_OPENAI_API_KEY"):
+        monkeypatch.setenv(key, "test-key")
     runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
 
-    result = runtime.run_call(
-        name="web_search",
-        args={"query": "agent tool", "limit": 2},
-        enabled_toolsets=("web",),
-    )
+    availability = {item["name"]: item for item in runtime.list_tool_availability(enabled_toolsets=("web", "browser"))}
 
-    assert result["success"] is True
-    assert result["data"]["web"][0]["title"] == "agent tool"
-    assert result["limit"] == 2
+    assert availability["http_get"]["available"] is True
+    assert "web_search" not in availability
+    assert "browser_navigate" not in availability
 
 
 def test_http_get_runtime_fetches_json(monkeypatch):
@@ -382,25 +411,6 @@ def test_http_get_runtime_fetches_json(monkeypatch):
 
     assert result["ok"] is True
     assert result["json"] == {"ok": True, "weather": "clear"}
-
-
-def test_browser_runtime_invokes_heygent_browser_tool(monkeypatch):
-    fake_module = types.ModuleType("app.tools.web_runtime.browser_tool")
-
-    def fake_browser_navigate(url, task_id=None):
-        return json.dumps({"success": True, "url": url, "task_id": task_id})
-
-    fake_module.browser_navigate = fake_browser_navigate
-    monkeypatch.setitem(sys.modules, "app.tools.web_runtime.browser_tool", fake_module)
-    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
-
-    result = runtime.run_call(
-        name="browser_navigate",
-        args={"url": "https://example.com", "task_id": "task-test"},
-        enabled_toolsets=("browser",),
-    )
-
-    assert result == {"success": True, "url": "https://example.com", "task_id": "task-test"}
 
 
 def test_delegation_toolset_exposes_delegate_task_contract():
@@ -479,6 +489,106 @@ def test_session_agent_task_leaves_parent_waiting_by_default():
     assert work_repository.relations == []
 
 
+def test_session_agent_task_reuses_child_work_for_same_turn_and_payload():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    work_repository.items[parent.work_id] = parent
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-research",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.agent",
+            "config_snapshot": {"name": "Research", "role": "research"},
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={"workId": parent.work_id, "promptMessageId": "msg-1", "taskRunId": "task-root"},
+    )
+    args = {"title": "자료 조사", "instruction": "자료를 조사해줘"}
+
+    first = runtime.run_call(name="session_agent_task", args=args, enabled_toolsets=("work",))
+    second = runtime.run_call(name="session_agent_task", args=args, enabled_toolsets=("work",))
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["child_work"]["workId"] == second["child_work"]["workId"]
+    assert first["startExecution"] is True
+    assert second["startExecution"] is False
+    assert second["reused"] is True
+    assert len(work_repository.items) == 2
+    assert len(work_repository.comments) == 1
+
+
+def test_session_agent_task_reuses_root_and_child_work_for_same_prompt_message():
+    work_repository = FakeRuntimeWorkRepository()
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-weather",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.weather",
+            "config_snapshot": {"name": "Weather", "role": "research"},
+        }
+    )
+    context = {
+        "sessionId": "session-1",
+        "ownerKey": "7",
+        "ownerUserId": 7,
+        "prompt": "부산 기상 관련 일주일 소식을 조사하고 나한테 말해줘",
+        "promptMessageId": "msg-1",
+        "taskRunId": "task-root",
+        "allowSessionAgentRootWork": True,
+    }
+    args = {
+        "title": "부산 기상 조사",
+        "instruction": "부산 기상 관련 일주일 소식을 조사하고 요약해줘.",
+    }
+
+    first_runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context=dict(context),
+    )
+    second_runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context=dict(context),
+    )
+
+    first = first_runtime.run_call(name="session_agent_task", args=args, enabled_toolsets=("work",))
+    second = second_runtime.run_call(name="session_agent_task", args=args, enabled_toolsets=("work",))
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["parent_work"]["workId"] == second["parent_work"]["workId"]
+    assert first["child_work"]["workId"] == second["child_work"]["workId"]
+    assert first["startExecution"] is True
+    assert second["startExecution"] is False
+    assert second["reused"] is True
+    assert len(work_repository.items) == 2
+    assert len(work_repository.comments) == 1
+    assert work_repository.items[first["parent_work"]["workId"]].active_run_id == "task-root"
+
+
 def test_session_agent_task_rejects_agent_without_explicit_required_skill():
     work_repository = FakeRuntimeWorkRepository()
     parent = WorkItem(
@@ -537,6 +647,110 @@ def test_session_agent_task_rejects_agent_without_explicit_required_skill():
     assert len(work_repository.items) == 1
 
 
+def test_session_agent_task_merges_explicit_and_parent_design_skill_requirements():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    work_repository.items[parent.work_id] = parent
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-dev",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.dev",
+            "config_snapshot": {
+                "name": "개발 에이전트",
+                "role": "engineer",
+                "skills": ["subagent-driven-development"],
+            },
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={"workId": parent.work_id, "enabledSkillNames": ["awesome-design"]},
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={
+            "title": "대시보드 UI 구현",
+            "instruction": "awesome-design 지침을 우선 적용해 프로토타입 UI 코드를 구현하라.",
+            "assigneeAgentId": "agent-dev",
+            "requiredSkillNames": ["subagent-driven-development"],
+        },
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "session_agent_capability_mismatch"
+    assert result["error"]["requiredSkillNames"] == ["subagent-driven-development", "awesome-design"]
+    assert result["error"]["missingSkillNames"] == ["awesome-design"]
+    assert len(work_repository.items) == 1
+
+
+def test_session_agent_task_does_not_infer_parent_skill_from_exclusion_text():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    work_repository.items[parent.work_id] = parent
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-k",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.k",
+            "config_snapshot": {
+                "name": "K-에이전트",
+                "role": "k-services",
+                "skills": ["srt-booking"],
+            },
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={"workId": parent.work_id, "enabledSkillNames": ["mattermost-send", "notion"]},
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={
+            "title": "SRT 실제 예약",
+            "description": "SRT 예약만 담당합니다. Mattermost 공유와 Notion 일정 등록은 팀장이 직접 처리하므로 수행하지 마세요.",
+            "instruction": "srt-booking 스킬로 부산에서 수서로 가는 SRT를 예약하세요. Mattermost/Notion 작업은 수행하지 않음.",
+            "assigneeAgentId": "agent-k",
+            "requiredSkillNames": ["srt-booking"],
+        },
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is True
+    assert result["child_work"]["assigneeAgentId"] == "agent-k"
+
+
 def test_session_agent_task_can_create_root_work_when_default_agent_session_allows_it():
     work_repository = FakeRuntimeWorkRepository()
     agent_repository = FakeRuntimeAgentRepository(
@@ -558,6 +772,7 @@ def test_session_agent_task_can_create_root_work_when_default_agent_session_allo
             "ownerKey": "7",
             "ownerUserId": 7,
             "prompt": "SRT 예약 가능 여부를 확인해줘.",
+            "taskRunId": "task-root",
             "allowSessionAgentRootWork": True,
         },
     )
@@ -574,6 +789,7 @@ def test_session_agent_task_can_create_root_work_when_default_agent_session_allo
     assert result["child_work"]["parentId"] == parent_id
     assert work_repository.items[parent_id].assignee_agent_id == "CEO"
     assert work_repository.items[parent_id].source == "session_agent_task"
+    assert work_repository.items[parent_id].active_run_id == "task-root"
     assert work_repository.items[child_id].assignee_agent_id == "agent-travel"
     assert runtime.runtime_context["workId"] == parent_id
 
@@ -630,7 +846,7 @@ def test_delegate_task_normalizes_tool_names_to_worker_toolsets():
         name="delegate_task",
         args={
             "goal": "웹 자료 조사",
-            "toolsets": ["web_search", "web_extract", "read_file", "terminal.run"],
+            "toolsets": ["http_get", "read_file", "terminal.run"],
         },
         enabled_toolsets=("delegation",),
     )
@@ -666,51 +882,6 @@ def test_todo_writes_and_reads_full_json_ready_result():
         "cancelled": 0,
     }
     json.dumps(written, ensure_ascii=False)
-
-
-def test_step_writes_and_reads_declared_semantic_steps():
-    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
-
-    written = runtime.run_call(
-        name="step",
-        args={
-            "steps": [
-                {
-                    "id": "research",
-                    "title": "뉴스 근거 자료 조사",
-                    "summary": "뉴스 근거 자료 조사 중",
-                    "goal": "근거 자료를 정리한다.",
-                    "status": "completed",
-                },
-                {
-                    "id": "draft",
-                    "title": "뉴스 브리핑 문서 초안 작성",
-                    "summary": "뉴스 브리핑 문서 초안 작성 중",
-                    "goal": "조사 결과를 문서화한다.",
-                    "status": "in_progress",
-                },
-            ]
-        },
-    )
-    read = runtime.run_call(name="step", args={"steps": [], "merge": True})
-
-    assert written == read
-    assert written["steps"] == [
-        {
-            "id": "research",
-            "title": "뉴스 근거 자료 조사",
-            "summary": "뉴스 근거 자료 조사 중",
-            "goal": "근거 자료를 정리한다.",
-            "status": "completed",
-        },
-        {
-            "id": "draft",
-            "title": "뉴스 브리핑 문서 초안 작성",
-            "summary": "뉴스 브리핑 문서 초안 작성 중",
-            "goal": "조사 결과를 문서화한다.",
-            "status": "in_progress",
-        },
-    ]
 
 
 def test_todo_projection_accepts_json_string_tool_content():

@@ -18,7 +18,7 @@ public class SamsungHealthRequestDto {
     private Integer sleepDurationMinutes;
     private Double bodyFat;
     private Double skeletalMuscle;
-    private Integer bloodPressureSystolic;
-    private Integer bloodPressureDiastolic;
+    private Double bloodPressureSystolic;
+    private Double bloodPressureDiastolic;
     private Double bloodGlucose;
 }

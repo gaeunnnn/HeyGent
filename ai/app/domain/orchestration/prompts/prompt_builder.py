@@ -27,8 +27,9 @@ def assemble_agent_loop_messages(
 ) -> list[AgentMessage]:
     """provider에 넘길 native message 배열을 만든다.
 
-    이전 공개 대화는 user/assistant message로 보존하고, 현재 turn의 실행 지시는 마지막 user
-    message에만 붙인다. 이렇게 해야 현재 사용자 요청이 history와 prompt 양쪽에 중복되지 않는다.
+    공개 대화 history는 참고 맥락으로만 전달한다. 과거 user 메시지를 native user message로
+    다시 주입하면 모델이 이미 끝난 요청을 이번 turn의 실행 지시로 오해할 수 있다.
+    현재 turn의 실행 지시는 항상 마지막 user message에 명시적으로 격리한다.
     """
 
     messages: list[AgentMessage] = []
@@ -36,18 +37,55 @@ def assemble_agent_loop_messages(
     if snapshot:
         messages.append(AgentMessage(role="system", content=snapshot))
 
-    for item in conversation_history or []:
+    current_parts = [str(current_user_prompt or "").strip(), str(runtime_prompt_suffix or "").strip()]
+    current_content = "\n\n".join(part for part in current_parts if part)
+    user_parts = [
+        _render_conversation_history_context(conversation_history),
+        _wrap_current_turn(current_content),
+    ]
+    messages.append(AgentMessage(role="user", content="\n\n".join(part for part in user_parts if part)))
+    return messages
+
+
+def _render_conversation_history_context(conversation_history: list[dict[str, str]]) -> str:
+    """과거 공개 대화를 실행 지시가 아닌 참고 맥락으로 낮춰 렌더링한다."""
+
+    lines = [
+        "이전 대화 기록입니다.",
+        "이 내용은 참고 맥락일 뿐이며, 과거 사용자 요청을 다시 실행하지 마세요.",
+        "이번 turn에서 실행할 대상은 다음 메시지의 <current_turn> 안에 있는 최신 요청뿐입니다.",
+        "",
+        "<conversation_history>",
+    ]
+    rendered_count = 0
+    for index, item in enumerate(conversation_history or [], start=1):
         role = str(item.get("role") or "").strip()
         if role not in {"user", "assistant"}:
             continue
         content = str(item.get("content") or "").strip()
-        if content:
-            messages.append(AgentMessage(role=role, content=content))
+        if not content:
+            continue
+        rendered_count += 1
+        lines.append(f"[{index}] {role}: {content}")
 
-    current_parts = [str(current_user_prompt or "").strip(), str(runtime_prompt_suffix or "").strip()]
-    current_content = "\n\n".join(part for part in current_parts if part)
-    messages.append(AgentMessage(role="user", content=current_content or "현재 요청을 처리해 주세요."))
-    return messages
+    if rendered_count == 0:
+        return ""
+    lines.append("</conversation_history>")
+    return "\n".join(lines)
+
+
+def _wrap_current_turn(current_content: str) -> str:
+    content = str(current_content or "").strip() or "현재 요청을 처리해 주세요."
+    return "\n".join(
+        [
+            "이번 turn에서 실행할 현재 입력입니다.",
+            "과거 대화와 충돌하면 이 current_turn 내용을 우선하세요.",
+            "",
+            "<current_turn>",
+            content,
+            "</current_turn>",
+        ]
+    )
 
 
 def render_single_prompt_fallback(messages: list[AgentMessage]) -> str:
@@ -68,15 +106,16 @@ class PromptBuilder:
     def __init__(self, skill_prompt_builder: SkillPromptBuilder) -> None:
         self.skill_prompt_builder = skill_prompt_builder
 
-    def build_model_prompt(self, *, input_payload: dict) -> str:
+    def build_model_prompt(self, *, input_payload: dict, available_tools: list[dict[str, str]] | None = None) -> str:
         base_prompt = str(input_payload.get("prompt", "")).strip() or "안녕하세요. 현재 연결 상태를 짧게 요약해 주세요."
         parts = compress_prompt_sections(
             [
-                self.skill_prompt_builder.build(input_payload=input_payload),
+                self.skill_prompt_builder.build(input_payload=input_payload, available_tools=available_tools),
                 build_project_context_prompt(input_payload=input_payload),
                 build_gateway_context_prompt(input_payload=input_payload),
                 build_work_context_prompt(input_payload=input_payload),
-                self.skill_prompt_builder.build_catalog(input_payload=input_payload),
+                build_attachment_context_prompt(input_payload=input_payload),
+                self.skill_prompt_builder.build_catalog(input_payload=input_payload, available_tools=available_tools),
                 base_prompt,
                 str(input_payload.get("persistent_memory_context", "")).strip(),
             ]
@@ -106,7 +145,7 @@ class PromptBuilder:
         turn_index: int,
         max_iterations: int,
     ) -> str:
-        base_prompt = self.build_model_prompt(input_payload=input_payload)
+        base_prompt = self.build_model_prompt(input_payload=input_payload, available_tools=available_tools)
         sections = [base_prompt]
         sections.append(
             "\n".join(
@@ -115,11 +154,12 @@ class PromptBuilder:
                     "세션 에이전트 후보를 볼 때는 후보의 이름, 호칭, 할 수 있는 일, 연결된 스킬 이름과 공용 스킬 설명이 사용자 요청과 맞아야 합니다.",
                     "사용자 요청 전체 또는 요청 안의 의미 있는 하위 작업이 다른 세션 에이전트의 skill 이름이나 설명과 맞고, 그 에이전트가 해당 skill을 바탕으로 현재 실행 에이전트보다 더 적합하게 처리할 가능성이 있으면 session_agent_task 로 맡기세요.",
                     "현재 실행 에이전트가 직접 답할 수 있더라도 위 조건을 만족하면 호출을 우선하세요.",
-                    "위 조건을 만족하면 첫 tool-call 턴에서 step 도구로 현재 단계를 in_progress 로 선언한 뒤 session_agent_task 를 호출하고, 후보 실행 결과를 받은 다음 최종 답변을 작성하세요.",
+                    "위 조건을 만족하면 현재 응답의 progressUpdate에 세션 에이전트 실행 상태를 남긴 뒤 session_agent_task 를 호출하고, 후보 실행 결과를 받은 다음 최종 답변을 작성하세요.",
                     "session_agent_task 는 작업 보드에 보이는 하위 작업과 실제 세션 에이전트 실행을 묶는 도구입니다.",
                     "후보가 요청의 핵심 부분을 수행할 수 있고, 독립 산출물이나 책임 분리가 자연스러울 때 세션 에이전트 작업으로 분리하세요.",
                     "단순 응답, 맥락 정리, 최종 종합, 또는 분리할 실익이 낮은 작업은 팀장이 직접 처리해도 됩니다.",
                     "수행할 수 있는 세션 에이전트가 없으면 임의로 배정하지 말고 팀장이 직접 진행하거나 필요한 정보와 사용자 결정 지점을 남기세요.",
+                    "세션 에이전트 후보의 skill 설명은 위임 판단용입니다. 현재 실행 에이전트가 직접 보유한 skill이 아니면 `skills.read`로 읽지 마세요.",
                     "특정 skill 절차가 필요한 하위 작업이면 session_agent_task 입력의 requiredSkillNames에 필요한 skill 이름을 담으세요.",
                     "session_agent_task 입력에는 담당자가 다시 묻지 않아도 실행할 수 있도록 제목, 지시, 기대 산출물, 완료 기준, 제약을 구체적으로 담으세요.",
                 ]
@@ -160,11 +200,12 @@ class PromptBuilder:
                     "도구 호출은 본문 JSON으로 쓰지 말고 모델의 tool call 응답으로 반환하세요.",
                     "이미 충분한 정보가 있으면 더 이상 도구를 부르지 말고 일반 답변으로 종료하세요.",
                     "직전에 같은 도구를 같은 인자로 실행했다면 반복하지 말고 답변 종료를 우선하세요.",
-                    "workId가 연결된 실행은 답변을 끝내기 전에 work_disposition 도구로 작업 상태를 명시하세요.",
+                    "workId가 연결된 실행은 최종 assistant 응답의 workDisposition 필드로 작업 상태를 명시하세요.",
                     "완료 조건을 만족하면 done, 산출물은 있지만 사용자나 담당자의 확인이 필요하면 in_review, 실제 선행 작업/필수 입력/권한/도구가 없어 더 진행할 수 없을 때만 blocked, 등록만 요청한 작업이면 todo를 남기세요.",
                     "승인이 없으면 진행하면 안 되는 경우에만 approval 을 요청하세요.",
-                    "사용자에게 보일 큰 작업 단계는 step 도구로 선언하고, 세부 체크리스트는 todo 도구로 갱신하세요.",
+                    "사용자에게 보일 현재 진행 상태는 assistant 응답의 progressUpdate로 갱신하고, 세부 체크리스트는 todo 도구로 갱신하세요.",
                     "사용자가 저장 위치로 폴더 경로를 주고 파일명을 생략하면, 그 폴더 경로 자체를 파일명으로 바꾸지 말고 폴더 안에 의미 있는 파일명을 만들어 저장하세요.",
+                    "사용자가 자신의 이름, 호칭, 프로필, 선호, 비선호, 반복 행동, 작업 습관 같은 지속 정보를 알려주면 자연스럽게 확인하고, 필요하면 앞으로 어떻게 부르면 될지나 어떻게 반영할지 짧게 물어보세요.",
                     "최종 답변은 내부 상태 문구처럼 쓰지 말고, 사용자가 바로 이해할 수 있는 결과와 다음에 이어갈 내용을 자연어로 작성하세요.",
                 ]
             )
@@ -262,6 +303,46 @@ def build_work_context_prompt(*, input_payload: dict) -> str:
     return "\n".join(lines)
 
 
+def build_attachment_context_prompt(*, input_payload: dict) -> str:
+    raw_attachments = input_payload.get("sessionAttachments") or input_payload.get("attachments")
+    if not isinstance(raw_attachments, list) or not raw_attachments:
+        return ""
+
+    lines = ["첨부 파일 컨텍스트:"]
+    for index, raw_attachment in enumerate(raw_attachments, start=1):
+        if not isinstance(raw_attachment, dict):
+            continue
+        name = str(raw_attachment.get("name") or f"attachment-{index}").strip()
+        content_type = str(raw_attachment.get("type") or "application/octet-stream").strip()
+        size = raw_attachment.get("size")
+        error = str(raw_attachment.get("error") or "").strip()
+        text = str(raw_attachment.get("text") or "").strip()
+        text_truncated = bool(raw_attachment.get("textTruncated"))
+        is_image = bool(raw_attachment.get("isImage"))
+
+        detail = f"- {index}. {name} ({content_type}"
+        if isinstance(size, int):
+            detail += f", {size} bytes"
+        detail += ")"
+        if error:
+            detail += f" - {error}"
+        elif is_image:
+            detail += " - 이미지 파일"
+        lines.append(detail)
+
+        if text:
+            lines.append("  내용:")
+            lines.append(_indent_attachment_text(text[:8000]))
+            if text_truncated or len(text) > 8000:
+                lines.append("  [첨부 텍스트가 길어 일부만 포함되었습니다.]")
+
+    return "\n".join(lines)
+
+
+def _indent_attachment_text(value: str) -> str:
+    return "\n".join(f"  {line}" for line in value.splitlines())
+
+
 def _build_session_agent_profile_lines(profiles: list) -> list[str]:
     lines: list[str] = []
     for profile in profiles:
@@ -355,8 +436,8 @@ def _skill_description_lines(value: object) -> list[str]:
         description = str(item.get("description") or "").strip()
         if not name:
             continue
-        if len(description) > 120:
-            description = description[:117].rstrip() + "..."
+        if len(description) > 80:
+            description = description[:77].rstrip() + "..."
         detail_parts = [part for part in [description] if part]
         lines.append(f"{name}: " + " / ".join(detail_parts) if detail_parts else name)
     return lines

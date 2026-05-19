@@ -1,9 +1,11 @@
 import type { CustomAgentConfig } from './NewSessionModal'
 
+// 메인(팀장) 에이전트의 고정 프로필 이미지. 더 이상 여러 옵션을 좌우 화살표로 바꿀 수 없으며
+// 모든 화면에서 동일한 이미지를 사용한다.
+export const CEO_PROFILE_IMAGE_SRC = '/assets/agents/ceo/ceo_profile_img.png'
+
 export const CEO_IMAGE_OPTIONS = [
-  { id: 'desk', label: '책상', src: '/assets/agents/ceo/ceo_desk.png' },
-  { id: 'explain', label: '설명', src: '/assets/agents/ceo/ceo_explain.png' },
-  { id: 'profile', label: '프로필', src: '/assets/agents/ceo/ceo_profile.png' },
+  { id: 'profile', label: '프로필', src: CEO_PROFILE_IMAGE_SRC },
 ] as const
 
 export function defaultAgentSessionConfig(): CustomAgentConfig {

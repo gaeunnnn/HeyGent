@@ -42,6 +42,22 @@ def profile_model(profile: dict[str, Any] | None) -> str | None:
     return text or None
 
 
+def profile_provider_name(profile: dict[str, Any] | None) -> str | None:
+    if profile is None:
+        return None
+    config = profile.get("config_snapshot") if isinstance(profile.get("config_snapshot"), dict) else {}
+    model = str(config.get("model") or profile.get("model_name") or "").strip()
+    if model.lower().startswith("gemini-"):
+        return "gemini_api_key"
+    value = config.get("providerName") or config.get("provider_name") or config.get("adapterType") or profile.get("provider_name")
+    text = str(value or "").strip()
+    if text == "openai":
+        return "openai_api_key"
+    if text == "gemini":
+        return "gemini_api_key"
+    return text or None
+
+
 def _profile_skill_descriptions(profile_payload: dict[str, Any], *, skill_registry: Any | None) -> list[dict[str, str]]:
     skills = getattr(skill_registry, "_skills", {}) if skill_registry is not None else {}
     if not isinstance(skills, dict):

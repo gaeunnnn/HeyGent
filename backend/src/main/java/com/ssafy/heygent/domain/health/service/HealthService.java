@@ -35,7 +35,7 @@ public class HealthService {
 
         DailyActivity activity = DailyActivity.builder()
                 .measurementLog(mainLog)
-                .stepCount(dto.getSteps().intValue())
+                .stepCount(dto.getSteps() != null ? dto.getSteps().intValue() : null)
                 .activeMinutes(dto.getActiveTimeMinutes())
                 .totalCalories(dto.getCaloriesBurned())
                 .activeCalories(dto.getActiveCalories())
@@ -50,8 +50,8 @@ public class HealthService {
         VitalLog vital = VitalLog.builder()
                 .measurementLog(mainLog)
                 .heartRateBpm(dto.getHeartRate())
-                .systolicBp(dto.getBloodPressureSystolic().doubleValue())
-                .diastolicBp(dto.getBloodPressureDiastolic().doubleValue())
+                .systolicBp(dto.getBloodPressureSystolic())
+                .diastolicBp(dto.getBloodPressureDiastolic())
                 .build();
 
         SleepRecord sleep = SleepRecord.builder()

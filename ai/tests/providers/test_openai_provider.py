@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from app.core.config import Settings
+from app.domain.providers.model.base import build_agent_model_response, parse_assistant_response_contract
 from app.domain.providers.model.openai_api import OpenAIAPIProvider
 from app.domain.providers.registry import ProviderRegistry
 
@@ -37,6 +38,49 @@ def test_openai_api_provider_health_and_stub_respond():
     assert health.configured is False
     assert health.connected is False
     assert response.output_text.startswith("[stub:openai_api]")
+
+
+def test_parse_assistant_response_contract_extracts_envelope():
+    contract = parse_assistant_response_contract(
+        """```json
+{"text":"완료했습니다.","progressUpdate":{"title":"날씨 조회","summary":"기상 자료 확인 중"},"workDisposition":{"status":"done","summary":"처리 완료"}}
+```"""
+    )
+
+    assert contract["text"] == "완료했습니다."
+    assert contract["progressUpdate"] == {"title": "날씨 조회", "summary": "기상 자료 확인 중"}
+    assert contract["workDisposition"] == {"status": "done", "summary": "처리 완료"}
+
+
+def test_build_agent_model_response_extracts_assistant_envelope():
+    response = build_agent_model_response(
+        provider_name="openai_api",
+        requested_model="gpt-test",
+        response_json={
+            "id": "resp_contract",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                '{"text":"정리 완료","progressUpdate":{"title":"자료 정리","summary":"정리 중"},'
+                                '"workDisposition":{"status":"done","summary":"완료"}}'
+                            ),
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.visible_text == "정리 완료"
+    assert response.progress_update == {"title": "자료 정리", "summary": "정리 중"}
+    assert response.work_disposition == {"status": "done", "summary": "완료"}
+    assert response.metadata["response_contract"]["progressUpdate"]["title"] == "자료 정리"
 
 
 def test_openai_api_provider_respond_preserves_native_tool_call(monkeypatch):
@@ -212,6 +256,69 @@ async def test_openai_api_provider_uses_backend_credential_and_records_usage_asy
             },
         }
     ]
+    assert response.output_text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_openai_api_provider_uses_backend_credential_without_task_run_id_and_skips_usage_async():
+    settings = Settings(
+        openai_api_key="",
+        openai_rest_api_base_url="https://api.openai.test/v1",
+        openai_response_model="gpt-fallback",
+    )
+    issued: list[dict] = []
+    recorded: list[dict] = []
+    captured: dict = {}
+
+    class FakeBackendAiClient:
+        async def issue_credential(self, **kwargs):
+            issued.append(kwargs)
+
+            class Credential:
+                provider_name = "openai_api_key"
+                model = "gpt-agent"
+                credential = "sk-issued"
+
+            return Credential()
+
+        async def record_command_usage(self, **kwargs):
+            recorded.append(kwargs)
+
+    class FakeOpenAIHttpClient:
+        async def post(self, url, headers=None, json=None, timeout=None, data=None):
+            captured["headers"] = headers
+            captured["json"] = json
+            return DummyHTTPResponse(
+                {
+                    "id": "resp_memory",
+                    "model": "gpt-agent",
+                    "status": "completed",
+                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                }
+            )
+
+    provider = OpenAIAPIProvider(
+        settings,
+        http_client=FakeOpenAIHttpClient(),
+        backend_ai_client=FakeBackendAiClient(),
+    )
+
+    response = await provider.respond_async(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+        model="gpt-agent",
+        runtime_context={
+            "user_id": "10",
+            "provider_name": "openai_api_key",
+            "session_id": "session-1",
+        },
+    )
+
+    assert issued == [{"user_id": "10", "provider_name": "openai_api_key", "model": "gpt-agent"}]
+    assert captured["headers"]["Authorization"] == "Bearer sk-issued"
+    assert captured["json"]["model"] == "gpt-agent"
+    assert recorded == []
     assert response.output_text == "ok"
 
 

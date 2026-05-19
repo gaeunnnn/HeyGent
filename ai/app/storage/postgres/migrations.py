@@ -34,7 +34,7 @@ POSTGRES_MIGRATIONS: tuple[PostgresMigration, ...] = (
             """
             UPDATE ai_agent_profiles
             SET
-                config_snapshot = '{"promptRole":"main","toolsets":["skills","session","planning","terminal","file","web","browser","delegation"]}'::jsonb,
+                config_snapshot = '{"promptRole":"main","toolsets":["skills","session","planning","terminal","file","web","delegation"]}'::jsonb,
                 delegation_policy = '{"canDelegate":true,"maxWorkerDepth":1,"maxConcurrentWorkers":3}'::jsonb
             WHERE owner_key = 'system'
               AND profile_key = 'main.default'
@@ -43,7 +43,7 @@ POSTGRES_MIGRATIONS: tuple[PostgresMigration, ...] = (
             """
             UPDATE ai_agent_profiles
             SET
-                config_snapshot = '{"promptRole":"worker","toolsets":["skills","terminal","file","web","browser"]}'::jsonb,
+                config_snapshot = '{"promptRole":"worker","toolsets":["skills","terminal","file","web"]}'::jsonb,
                 delegation_policy = '{"canDelegate":false,"maxWorkerDepth":0,"hardTimeoutSeconds":900,"maxIterations":80}'::jsonb
             WHERE owner_key = 'system'
               AND profile_key = 'worker.default'
@@ -734,6 +734,53 @@ POSTGRES_MIGRATIONS: tuple[PostgresMigration, ...] = (
         ),
     ),
     PostgresMigration(
+        migration_id="0018_session_prototype_artifacts",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS session_prototype_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+                owner_key TEXT NOT NULL,
+                title TEXT NOT NULL,
+                framework TEXT NOT NULL DEFAULT 'react' CHECK (framework IN ('react', 'html')),
+                styling TEXT NOT NULL DEFAULT 'css' CHECK (styling IN ('css', 'tailwind', 'mixed')),
+                design_preset_id TEXT,
+                active_version_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                is_active BOOLEAN NOT NULL DEFAULT true,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS session_prototype_artifact_versions (
+                version_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL REFERENCES session_prototype_artifacts(artifact_id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+                owner_key TEXT NOT NULL,
+                version_number INTEGER NOT NULL,
+                prompt_message_id TEXT,
+                task_run_id TEXT,
+                files_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                entry_file TEXT NOT NULL DEFAULT '/src/App.tsx',
+                summary TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (artifact_id, version_number)
+            );
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_session_prototype_artifacts_active
+            ON session_prototype_artifacts(session_id, owner_key, updated_at DESC)
+            WHERE is_active = true;
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_session_prototype_artifact_versions_artifact
+            ON session_prototype_artifact_versions(artifact_id, version_number DESC);
+            """,
+        ),
+    ),
+    PostgresMigration(
         migration_id="0018_workflow_templates_session_scope",
         statements=(
             """
@@ -743,6 +790,71 @@ POSTGRES_MIGRATIONS: tuple[PostgresMigration, ...] = (
             """
             CREATE INDEX IF NOT EXISTS idx_workflow_templates_session
             ON workflow_templates(session_id, updated_at DESC);
+            """,
+        ),
+    ),
+    PostgresMigration(
+        migration_id="0019_remove_removed_browser_toolset",
+        statements=(
+            """
+            UPDATE ai_agent_profiles
+            SET config_snapshot = jsonb_set(
+                config_snapshot,
+                '{toolsets}',
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(toolset_name)
+                        FROM jsonb_array_elements(config_snapshot->'toolsets') AS toolset_name
+                        WHERE toolset_name <> to_jsonb('browser'::text)
+                    ),
+                    '[]'::jsonb
+                ),
+                true
+            )
+            WHERE config_snapshot ? 'toolsets'
+              AND config_snapshot->'toolsets' @> '["browser"]'::jsonb;
+            """,
+            """
+            UPDATE agent_sessions
+            SET settings = jsonb_set(
+                settings,
+                '{toolsets}',
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(toolset_name)
+                        FROM jsonb_array_elements(settings->'toolsets') AS toolset_name
+                        WHERE toolset_name <> to_jsonb('browser'::text)
+                    ),
+                    '[]'::jsonb
+                ),
+                true
+            )
+            WHERE settings ? 'toolsets'
+              AND settings->'toolsets' @> '["browser"]'::jsonb;
+            """,
+        ),
+    ),
+    PostgresMigration(
+        migration_id="0020_agent_secret_values",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS ai_agent_secret_values (
+                secret_value_id TEXT PRIMARY KEY,
+                owner_key TEXT NOT NULL,
+                owner_user_id BIGINT REFERENCES users(id),
+                profile_id TEXT NOT NULL REFERENCES ai_agent_profiles(profile_id) ON DELETE CASCADE,
+                document_key TEXT NOT NULL,
+                section_key TEXT NOT NULL,
+                secret_key TEXT NOT NULL,
+                encrypted_value TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (profile_id, document_key, section_key, secret_key)
+            );
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_ai_agent_secret_values_profile
+            ON ai_agent_secret_values(profile_id, document_key, section_key);
             """,
         ),
     ),

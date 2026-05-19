@@ -21,5 +21,7 @@ COPY . .
 
 EXPOSE 5173
 
-# Vite dev 서버를 0.0.0.0 바인딩으로 띄워야 컨테이너 외부에서 접속할 수 있다.
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+# Vite dev 서버를 IPv4 + IPv6 dual-stack 으로 바인딩한다.
+# vite.config.ts 의 server.host: true 가 이를 처리하므로 CLI 에서 --host 0.0.0.0 을 주지 않는다.
+# (--host 0.0.0.0 은 IPv4 만 listen 해서 Windows 호스트의 localhost(::1) 가 connection refused 가 된다.)
+CMD ["npm", "run", "dev", "--", "--port", "5173"]

@@ -387,10 +387,13 @@ export function AgentSkillsPanel({ children }: { children: ReactNode }) {
           <p>
             에이전트가 쓸 수 있는 <span className="text-foreground">도구</span>예요.
           </p>
-          <p>체크하면 켜지고, 해제하면 꺼집니다.</p>
           <p>
-            예) <span className="text-foreground">웹 검색</span>을 켜면 인터넷에서 자료를
-            찾아옵니다.
+            오른쪽 목록의 항목을 <span className="text-foreground">왼쪽으로 옮기면</span> 에이전트가
+            그 스킬을 사용할 수 있게 됩니다. 다시 오른쪽으로 옮기면 사용을 멈춥니다.
+          </p>
+          <p>
+            예) <span className="text-foreground">노션</span>을 왼쪽으로 옮기면 노션 문서를 읽고
+            페이지를 만들거나 정리할 수 있어요.
           </p>
         </HelpHint>
       </div>

@@ -15,6 +15,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.ssafy.heygent.domain.ai.dto.response.OpenAiApiKeyConnectionResponse;
+import com.ssafy.heygent.domain.ai.openai.client.OpenAiCredentialCacheClient;
 import com.ssafy.heygent.domain.ai.openai.entity.OpenAiProviderConnection;
 import com.ssafy.heygent.domain.ai.openai.model.OpenAiProviderName;
 import com.ssafy.heygent.domain.ai.openai.repository.OpenAiProviderConnectionRepository;
@@ -29,11 +30,18 @@ class OpenAiApiKeyServiceTest {
     @Mock
     private OpenAiCredentialCipher credentialCipher;
 
+    @Mock
+    private OpenAiCredentialCacheClient credentialCacheClient;
+
     private OpenAiApiKeyService openAiApiKeyService;
 
     @BeforeEach
     void setUp() {
-        openAiApiKeyService = new OpenAiApiKeyService(openAiProviderConnectionRepository, credentialCipher);
+        openAiApiKeyService = new OpenAiApiKeyService(
+            openAiProviderConnectionRepository,
+            credentialCipher,
+            credentialCacheClient
+        );
     }
 
     @Test
@@ -53,6 +61,7 @@ class OpenAiApiKeyServiceTest {
         assertThat(captor.getValue().getProviderName()).isEqualTo("openai_api_key");
         assertThat(captor.getValue().getEncryptedAccessToken()).isEqualTo("encrypted");
         assertThat(response.isConnected()).isTrue();
+        verify(credentialCacheClient).invalidate(1L, "openai_api_key");
     }
 
     @Test
@@ -74,6 +83,7 @@ class OpenAiApiKeyServiceTest {
         assertThat(captor.getValue().getEncryptedAccessToken()).isEqualTo("encrypted-gemini");
         assertThat(response.getProviderName()).isEqualTo("gemini_api_key");
         assertThat(response.isConnected()).isTrue();
+        verify(credentialCacheClient).invalidate(1L, "gemini_api_key");
     }
 
     @Test
@@ -86,5 +96,6 @@ class OpenAiApiKeyServiceTest {
         );
         verify(openAiProviderConnectionRepository).deleteByUserIdAndProviderName(1L, "openai_user_api_key");
         assertThat(response.isConnected()).isFalse();
+        verify(credentialCacheClient).invalidate(1L, "openai_api_key");
     }
 }

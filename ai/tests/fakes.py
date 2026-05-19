@@ -33,6 +33,16 @@ class InMemoryTaskRepository:
         self.tasks[saved.task_run_id] = saved
         return deepcopy(saved)
 
+    def create_direct_task(self, task: TaskRun) -> TaskRun:
+        task.queue_status = "running"
+        task.claim_owner = None
+        task.claimed_at = None
+        task.lease_expires_at = None
+        task.heartbeat_at = None
+        task.next_attempt_at = None
+        task.attempts = int(task.attempts or 0)
+        return self.create_task(task)
+
     def create_pending_task(self, task: TaskRun) -> TaskRun:
         now = utc_now()
         task.status = "PENDING"

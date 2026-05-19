@@ -24,7 +24,7 @@ import org.springframework.beans.factory.ObjectProvider;
 @ExtendWith(MockitoExtension.class)
 class MqttDisplayPublisherTest {
 
-    private static final String DEVICE_ID = "esp32c3-oled-001";
+    private static final String DEVICE_ID = "heygent-c3-a1b2c3";
 
     @Mock
     private ObjectProvider<MqttDisplayGateway> gatewayProvider;
@@ -50,7 +50,7 @@ class MqttDisplayPublisherTest {
         DisplayPublishResult result = publisher.publish(DEVICE_ID, payload);
 
         assertThat(result.published()).isFalse();
-        assertThat(result.topic()).isEqualTo("devices/esp32c3-oled-001/display");
+        assertThat(result.topic()).isEqualTo("devices/heygent-c3-a1b2c3/display");
         assertThat(result.qos()).isZero();
         assertThat(result.reason()).isEqualTo("MQTT disabled");
         verify(gatewayProvider, never()).getIfAvailable();
@@ -65,7 +65,7 @@ class MqttDisplayPublisherTest {
         DisplayPublishResult result = publisher.publish(DEVICE_ID, payload);
 
         assertThat(result.published()).isFalse();
-        assertThat(result.topic()).isEqualTo("devices/esp32c3-oled-001/display");
+        assertThat(result.topic()).isEqualTo("devices/heygent-c3-a1b2c3/display");
         assertThat(result.qos()).isZero();
         assertThat(result.reason()).isEqualTo("MQTT gateway unavailable");
     }
@@ -80,7 +80,7 @@ class MqttDisplayPublisherTest {
         DisplayPublishResult result = publisher.publish(DEVICE_ID, payload);
 
         assertThat(result.published()).isTrue();
-        assertThat(result.topic()).isEqualTo("devices/esp32c3-oled-001/display");
+        assertThat(result.topic()).isEqualTo("devices/heygent-c3-a1b2c3/display");
         assertThat(result.qos()).isZero();
 
         ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
@@ -89,7 +89,7 @@ class MqttDisplayPublisherTest {
         verify(gateway).publish(topicCaptor.capture(), payloadCaptor.capture(), qosCaptor.capture());
 
         JsonNode json = objectMapper.readTree(payloadCaptor.getValue());
-        assertThat(topicCaptor.getValue()).isEqualTo("devices/esp32c3-oled-001/display");
+        assertThat(topicCaptor.getValue()).isEqualTo("devices/heygent-c3-a1b2c3/display");
         assertThat(qosCaptor.getValue()).isZero();
         assertThat(json.get("type").asText()).isEqualTo("STEP");
         assertThat(json.get("icon").asText()).isEqualTo("search");
@@ -110,8 +110,8 @@ class MqttDisplayPublisherTest {
 
         assertThat(waitingResult.qos()).isEqualTo(1);
         assertThat(canceledResult.qos()).isEqualTo(1);
-        verify(gateway).publish("devices/esp32c3-oled-001/display", jsonFor(DisplayEventType.WAITING, DisplayIcon.WAIT), 1);
-        verify(gateway).publish("devices/esp32c3-oled-001/display", jsonFor(DisplayEventType.CANCELED, DisplayIcon.CANCEL), 1);
+        verify(gateway).publish("devices/heygent-c3-a1b2c3/display", jsonFor(DisplayEventType.WAITING, DisplayIcon.WAIT), 1);
+        verify(gateway).publish("devices/heygent-c3-a1b2c3/display", jsonFor(DisplayEventType.CANCELED, DisplayIcon.CANCEL), 1);
     }
 
     @Test
@@ -122,7 +122,7 @@ class MqttDisplayPublisherTest {
 
         DisplayPublishResult result = publisher.publish("/" + DEVICE_ID + "/", payload(DisplayEventType.INFO, DisplayIcon.INFO));
 
-        assertThat(result.topic()).isEqualTo("devices/local/esp32c3-oled-001/display");
+        assertThat(result.topic()).isEqualTo("devices/local/heygent-c3-a1b2c3/display");
     }
 
     private DisplayEventPayload payload(DisplayEventType type, DisplayIcon icon) {

@@ -13,6 +13,7 @@ from app.api.session_agent_profiles import (
     agent_profile_prompt_payload as _agent_profile_prompt_payload,
     instruction_bundle_prompt_payload as _instruction_bundle_prompt_payload,
     profile_model as _profile_model,
+    profile_provider_name as _profile_provider_name,
 )
 from app.api.ws.command_types import (
     WebSocketAuthContext,
@@ -224,11 +225,12 @@ class WebSocketCommandRouter:
         include_archived = bool(payload.get("includeArchived", payload.get("include_archived", False)))
         offset = (page - 1) * page_size
         session_store = context.websocket.app.state.session_store
+        # 사용자별 세션은 최대 10개 보장 (제품 정책) — limit 을 작게 잡아 DB·메모리·정렬 비용 모두 절감.
         sessions = [
             session
             for session in session_store.list_sessions(
                 user_id=context.auth.user_id,
-                limit=10_000,
+                limit=10,
                 offset=0,
                 include_archived=include_archived,
             )
@@ -350,6 +352,9 @@ class WebSocketCommandRouter:
         effective_model = str(profile_model or settings_snapshot.get("model") or model or "").strip() or None
         if effective_model:
             task_input["model"] = effective_model
+        profile_provider = _profile_provider_name(main_profile) if main_profile is not None else None
+        if profile_provider:
+            task_input["provider_name"] = profile_provider
         transcript_session_id = _create_task_transcript_session(
             session_store,
             session_id=session_id,
@@ -426,6 +431,8 @@ class WebSocketCommandRouter:
             **dict(task.input_payload or {}),
             "after_user_message_version": user_append["after_user_message_version"],
             "completion_expected_version": user_append["completion_expected_version"],
+            "prompt_message_id": str(user_append["message_id"]),
+            "promptMessageId": str(user_append["message_id"]),
         }
         task_execution_supervisor = getattr(context.websocket.app.state, "task_execution_supervisor", None)
         try:
@@ -451,7 +458,7 @@ class WebSocketCommandRouter:
                     on_complete=finish_supervised_task,
                 )
             else:
-                context.websocket.app.state.repository.create_task(task)
+                context.websocket.app.state.repository.create_direct_task(task)
             if work_id is not None:
                 WorkService(context.websocket.app.state.work_repository).mark_run_started(
                     work_id=work_id,
@@ -538,6 +545,8 @@ class WebSocketCommandRouter:
                 "after_user_message_version": retry_state["completion_expected_version"],
                 "completion_expected_version": retry_state["completion_expected_version"],
                 "retry_source_message_id": retry_state["user_message_id"],
+                "prompt_message_id": str(retry_state["user_message_id"]),
+                "promptMessageId": str(retry_state["user_message_id"]),
                 "client_command_id": command_id,
             }
             if effective_model:
@@ -581,7 +590,7 @@ class WebSocketCommandRouter:
                     on_complete=finish_supervised_retry,
                 )
             else:
-                context.websocket.app.state.repository.create_task(task)
+                context.websocket.app.state.repository.create_direct_task(task)
             context.session_service.subscribe_task(
                 session_id=context.gateway_session_id,
                 websocket=context.websocket,
@@ -852,7 +861,7 @@ class WebSocketCommandRouter:
             {
                 "id": model_id,
                 "label": model_id,
-                "provider": "OpenAI",
+                "provider": "openai_api_key",
                 "is_current": model_id == current_model or (current_model is None and model_id == default_model),
             }
             for model_id in model_ids
@@ -868,7 +877,27 @@ class WebSocketCommandRouter:
                 "health": {"provider_name": "openai_api_key", "configured": True, "connected": True},
             }
         ]
-        return ("model.options.result", {"model": default_model, "providers": providers, "models": [model for provider in providers for model in provider["models"]]})
+        gemini_models = [
+            {
+                "id": model_id,
+                "label": model_id,
+                "provider": "gemini_api_key",
+                "is_current": model_id == current_model,
+            }
+            for model_id in ("gemini-2.5-pro", "gemini-2.5-flash")
+        ]
+        providers.append(
+            {
+                "slug": "gemini_api_key",
+                "provider_name": "gemini_api_key",
+                "models": gemini_models,
+                "is_current": any(model["is_current"] for model in gemini_models),
+                "total_models": len(gemini_models),
+                "warning": None,
+                "health": {"provider_name": "gemini_api_key", "configured": True, "connected": True},
+            }
+        )
+        return ("model.options.result", {"model": default_model, "providers": providers, "models": provider_models})
 
     async def _task_runs_active_list(self, payload: dict[str, Any], context: WebSocketCommandContext) -> tuple[str, dict[str, Any]]:
         session_id = _optional_str(payload.get("sessionId", payload.get("session_id")))
@@ -1236,6 +1265,12 @@ class WebSocketCommandRouter:
                 task_run_id=completed_task.task_run_id,
                 user_message_id=str(user_message_id),
                 assistant_message_id=str(assistant_append["message_id"]),
+                model=str((completed_task.input_payload or {}).get("model") or "") or None,
+                provider_name=str(
+                    (completed_task.input_payload or {}).get("provider_name")
+                    or (completed_task.input_payload or {}).get("providerName")
+                    or ""
+                ) or None,
             )
             mark_used_observation = await mark_used_recalled_memories(
                 app_state=context.websocket.app.state,
@@ -1249,6 +1284,12 @@ class WebSocketCommandRouter:
                 repository=context.websocket.app.state.repository,
                 writeback=writeback_observation,
                 mark_used=mark_used_observation,
+            )
+            await context.send_json(
+                _event_frame(
+                    "taskRun.snapshot.result",
+                    _task_snapshot_payload(completed_task),
+                )
             )
 
     async def _run_resume_task(self, *, context: WebSocketBackgroundContext, task_run_id: str, approval_id: str, payload: dict[str, Any]) -> None:
@@ -1478,6 +1519,9 @@ def _attach_target_agent_context(state: Any, *, task_input: dict[str, Any], work
     profile_model = _profile_model(profile)
     if profile_model:
         task_input["model"] = profile_model
+    profile_provider = _profile_provider_name(profile)
+    if profile_provider:
+        task_input["provider_name"] = profile_provider
     bundle = agent_repository.get_instruction_bundle(profile_id=profile_id, owner_key=str(work.owner_key))
     if bundle is None:
         return

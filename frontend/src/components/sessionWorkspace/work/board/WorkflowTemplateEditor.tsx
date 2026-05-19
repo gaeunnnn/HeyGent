@@ -45,7 +45,7 @@ type AgentChoice = {
   templateKey?: string
 }
 
-const CEO_PROFILE_IMAGE = '/assets/agents/ceo/ceo_profile.png'
+const CEO_PROFILE_IMAGE = '/assets/agents/ceo/ceo_profile_img.png'
 
 type FlowNodeData = Record<string, unknown> & {
   imageUrl?: string

@@ -229,7 +229,7 @@ fun ChatInputBar(
     onStop: () -> Unit,
     onPlusClick: () -> Unit = {},
     onVoiceMode: () -> Unit = {},
-    placeholder: String = "젠틀맨 어시스턴트에게 질문하세요...",
+    placeholder: String = "HeyGent 어시스턴트에게 질문하세요...",
 ) {
     var isRecording by remember { mutableStateOf(false) }
     var isTranscribing by remember { mutableStateOf(false) }

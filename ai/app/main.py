@@ -40,10 +40,12 @@ from app.api.memory_mark_used import LlmMemoryUsageAttributionVerifier
 from app.domain.orchestration.orchestrator import Orchestrator
 from app.domain.orchestration.runtime_planning import Planner
 from app.domain.orchestration.task_execution_supervisor import TaskExecutionSupervisor, TaskExecutionSupervisorConfig
-from app.domain.providers.model import OpenAIAPIProvider
+from app.domain.agents.secret_store import AesGcmAgentSecretCipher, AgentSecretStoreNotConfigured
+from app.domain.providers.model import GeminiAPIProvider, OpenAIAPIProvider
 from app.domain.providers.registry import ProviderRegistry
 from app.storage.postgres import (
     PostgresAgentRepository,
+    PostgresPrototypeArtifactRepository,
     PostgresSessionStore,
     PostgresSkillRepository,
     PostgresTaskRepository,
@@ -118,6 +120,7 @@ async def lifespan(app: FastAPI):
     provider_registry = ProviderRegistry(
         [
             OpenAIAPIProvider(settings),
+            GeminiAPIProvider(settings),
         ]
     )
     memory_extraction_provider = ProviderMemoryExtractionClient(provider_registry=provider_registry)
@@ -126,14 +129,24 @@ async def lifespan(app: FastAPI):
         backend_memory_client,
         operation_provider=memory_extraction_provider,
     )
-    memory_recall_planner_provider = ProviderMemoryRecallPlannerClient(provider_registry=provider_registry)
-    memory_recall_planner = LlmMemoryRecallPlanner(provider=memory_recall_planner_provider)
+    memory_recall_planner = None
+    if settings.memory_recall_llm_planner_enabled:
+        memory_recall_planner_provider = ProviderMemoryRecallPlannerClient(provider_registry=provider_registry)
+        memory_recall_planner = LlmMemoryRecallPlanner(provider=memory_recall_planner_provider)
     memory_usage_attribution_provider = ProviderMemoryUsageAttributionClient(provider_registry=provider_registry)
     memory_usage_attribution_verifier = LlmMemoryUsageAttributionVerifier(provider=memory_usage_attribution_provider)
     session_store = PostgresSessionStore(postgres_connection_factory)
     work_repository = PostgresWorkRepository(postgres_connection_factory)
     workflow_template_repository = PostgresWorkflowTemplateRepository(postgres_connection_factory)
-    agent_repository = PostgresAgentRepository(postgres_connection_factory)
+    try:
+        agent_secret_cipher = AesGcmAgentSecretCipher(settings.agent_secret_encryption_key)
+    except AgentSecretStoreNotConfigured:
+        agent_secret_cipher = None
+    agent_repository = PostgresAgentRepository(
+        postgres_connection_factory,
+        secret_cipher=agent_secret_cipher,
+    )
+    prototype_repository = PostgresPrototypeArtifactRepository(postgres_connection_factory)
     agent_repository.ensure_builtin_templates()
     # recall_service = RecallService(session_store)
     # memory_store = MemoryStore()
@@ -153,6 +166,7 @@ async def lifespan(app: FastAPI):
         bridge_session_manager=bridge_session_manager,
         work_repository=work_repository,
         agent_repository=agent_repository,
+        prototype_repository=prototype_repository,
     )
     tool_catalog = ToolCatalog(
         tool_runtime,
@@ -163,9 +177,10 @@ async def lifespan(app: FastAPI):
             "terminal",
             "file",
             "web",
-            "browser",
             "work",
             "messaging",
+            "design",
+            "prototype",
         ),
     )
     child_session_launcher = ChildSessionLauncher()
@@ -234,6 +249,7 @@ async def lifespan(app: FastAPI):
     app.state.work_repository = work_repository
     app.state.workflow_template_repository = workflow_template_repository
     app.state.agent_repository = agent_repository
+    app.state.prototype_repository = prototype_repository
     app.state.skill_repository = skill_repository
     # app.state.recall_service = recall_service
     # app.state.memory_store = memory_store

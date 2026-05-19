@@ -1,6 +1,6 @@
 ﻿---
 name: academic-paper-search
-description: Search and retrieve academic papers from arXiv using their free REST API. No API key needed. Search by keyword, author, category, or ID. Combine with web_extract or the ocr-and-documents skill to read full paper content.
+description: Search and retrieve academic papers from arXiv using their free REST API. No API key needed. Search by keyword, author, category, or ID. Combine with http_get, curl, or the ocr-and-documents skill to read full paper content.
 version: 1.0.0
 author: HeyGent AI
 license: MIT
@@ -20,8 +20,8 @@ Search and retrieve academic papers from arXiv via their free REST API. No API k
 |--------|---------|
 | Search papers | `curl "https://export.arxiv.org/api/query?search_query=all:QUERY&max_results=5"` |
 | Get specific paper | `curl "https://export.arxiv.org/api/query?id_list=2402.03300"` |
-| Read abstract (web) | `web_extract(urls=["https://arxiv.org/abs/2402.03300"])` |
-| Read full paper (PDF) | `web_extract(urls=["https://arxiv.org/pdf/2402.03300"])` |
+| Read abstract (web) | `http_get(url="https://arxiv.org/abs/2402.03300")` |
+| Read full paper (PDF) | Use the `ocr-and-documents` skill or local PDF tooling |
 
 ## Searching Papers
 
@@ -148,10 +148,10 @@ After finding a paper, read it:
 
 ```
 # Abstract page (fast, metadata + abstract)
-web_extract(urls=["https://arxiv.org/abs/2402.03300"])
+http_get(url="https://arxiv.org/abs/2402.03300")
 
-# Full paper (PDF → markdown via Firecrawl)
-web_extract(urls=["https://arxiv.org/pdf/2402.03300"])
+# Full paper
+# Use the ocr-and-documents skill or local PDF tooling.
 ```
 
 For local PDF processing, see the `ocr-and-documents` skill.
@@ -244,8 +244,8 @@ curl -s "https://api.semanticscholar.org/graph/v1/author/search?query=Yann+LeCun
 
 1. **Discover**: `python scripts/search_arxiv.py "your topic" --sort date --max 10`
 2. **Assess impact**: `curl -s "https://api.semanticscholar.org/graph/v1/paper/arXiv:ID?fields=citationCount,influentialCitationCount"`
-3. **Read abstract**: `web_extract(urls=["https://arxiv.org/abs/ID"])`
-4. **Read full paper**: `web_extract(urls=["https://arxiv.org/pdf/ID"])`
+3. **Read abstract**: `http_get(url="https://arxiv.org/abs/ID")`
+4. **Read full paper**: use the `ocr-and-documents` skill or local PDF tooling
 5. **Find related work**: `curl -s "https://api.semanticscholar.org/graph/v1/paper/arXiv:ID/references?fields=title,citationCount&limit=20"`
 6. **Get recommendations**: POST to Semantic Scholar recommendations endpoint
 7. **Track authors**: `curl -s "https://api.semanticscholar.org/graph/v1/author/search?query=NAME"`

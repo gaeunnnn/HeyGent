@@ -18,7 +18,14 @@ class ToolRegistry:
     ) -> None:
         _ = enabled_toolsets
         default_provider = provider_registry.preferred_model_provider()
-        self._handler = AgentLoopHandler(default_provider, prompt_builder, tool_runtime, tool_catalog, session_store=session_store)
+        self._handler = AgentLoopHandler(
+            default_provider,
+            prompt_builder,
+            tool_runtime,
+            tool_catalog,
+            session_store=session_store,
+            provider_registry=provider_registry,
+        )
 
     def resolve(self) -> TaskHandler:
         return self._handler

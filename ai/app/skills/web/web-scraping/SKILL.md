@@ -21,11 +21,11 @@ prerequisites:
 
 ## When to Use
 
-- Scraping static HTML pages (faster than browser tools)
+- Scraping static HTML pages when direct HTTP fetching is not enough
 - Scraping JS-rendered pages that need a real browser
 - Bypassing Cloudflare Turnstile or bot detection
 - Crawling multiple pages with a spider
-- When the built-in `web_extract` tool does not return the data you need
+- When `http_get` or simple search does not return the data you need
 
 ## Installation
 

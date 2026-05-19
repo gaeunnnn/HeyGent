@@ -17,7 +17,6 @@ import {
   getModelOptions,
   groupModels,
   inferModelFamily,
-  type ModelFamily,
 } from '../sessionWorkspaceUtils'
 import {
   SUB_AGENT_ADAPTER_OPTIONS,
@@ -58,13 +57,15 @@ export function SubAgentDraftForm({
   const [titleDraft, setTitleDraft] = useState(initialAgent?.title ?? initialAgent?.role ?? '')
   const [roleDraft, setRoleDraft] = useState(initialAgent?.role ?? 'general')
   const [descriptionDraft, setDescriptionDraft] = useState(initialAgent?.description ?? '')
-  const [adapterType, setAdapterType] = useState<SubAgentAdapterType>(
-    normalizeSubAgentAdapterType(initialAgent?.adapterType ?? initialAdapterType),
+  const initialNormalizedAdapterType = normalizeSubAgentAdapterType(
+    initialAgent?.adapterType ?? initialAdapterType,
   )
+  const [adapterType, setAdapterType] = useState<SubAgentAdapterType>(initialNormalizedAdapterType)
   const [commandDraft] = useState(initialAgent?.command ?? '')
-  const [modelDraft, setModelDraft] = useState(initialAgent?.model ?? getDefaultModel())
+  const [modelDraft, setModelDraft] = useState(
+    initialAgent?.model ?? getDefaultModel(initialNormalizedAdapterType),
+  )
   const [extraArgsDraft] = useState(initialAgent?.extraArgs ?? '')
-  const [selectedFamily, setSelectedFamily] = useState<ModelFamily>(inferModelFamily(modelDraft))
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false)
   const [modelOptionsError, setModelOptionsError] = useState<string | null>(null)
   const [modelOptions, setModelOptions] = useState(getModelOptions(undefined))
@@ -75,10 +76,34 @@ export function SubAgentDraftForm({
   const fetchModelOptions = useChatStore((state) => state.fetchModelOptions)
   const authenticatedReady = useAiRealtimeStore((state) => state.authenticatedReady)
   const profileImage = getSubAgentImageBySpriteId(spriteId).src
-  const modelGroups = useMemo(() => groupModels(modelOptions), [modelOptions])
-  const modelFamilies = useMemo(() => getModelFamilies(modelGroups), [modelGroups])
-  const effectiveSelectedFamily = modelFamilies.some((family) => family.id === selectedFamily)
-    ? selectedFamily
+  const providerModelOptions = useMemo(
+    () =>
+      modelOptions.filter((model) => {
+        const provider = model.provider?.toLowerCase()
+        if (adapterType === 'openai_api_key') {
+          return (
+            provider === undefined || provider.includes('openai') || provider === 'openai_api_key'
+          )
+        }
+        return provider === adapterType || model.id.toLowerCase().startsWith('gemini-')
+      }),
+    [adapterType, modelOptions],
+  )
+  const modelGroups = useMemo(() => groupModels(providerModelOptions), [providerModelOptions])
+  const effectiveModelDraft = providerModelOptions.some((model) => model.id === modelDraft)
+    ? modelDraft
+    : (providerModelOptions[0]?.id ?? getDefaultModel(adapterType))
+  const selectedModelOption = providerModelOptions.find((model) => model.id === effectiveModelDraft)
+  const modelFamilies = getModelFamilies(modelGroups)
+  const inferredSelectedFamily = inferModelFamily(
+    effectiveModelDraft,
+    selectedModelOption?.label,
+    selectedModelOption?.provider,
+  )
+  const effectiveSelectedFamily = modelFamilies.some(
+    (family) => family.id === inferredSelectedFamily,
+  )
+    ? inferredSelectedFamily
     : (modelFamilies[0]?.id ?? 'gpt')
   const visibleModels = modelGroups[effectiveSelectedFamily]
   const visibleModelOptions = visibleModels.map((model) => ({
@@ -107,7 +132,9 @@ export function SubAgentDraftForm({
     void fetchModelOptions()
       .then((options) => {
         if (!active) return
-        const nextModels = getModelOptions(options.models)
+        const providerModels =
+          options.providers?.flatMap((provider) => provider.models) ?? options.models
+        const nextModels = getModelOptions(providerModels)
         setModelOptions(nextModels)
         setModelOptionsLoading(false)
       })
@@ -140,7 +167,7 @@ export function SubAgentDraftForm({
       role: roleDraft,
       adapterType,
       command: commandDraft.trim(),
-      model: modelDraft.trim(),
+      model: effectiveModelDraft.trim(),
       extraArgs: extraArgsDraft.trim(),
       profileImage,
       spriteId,
@@ -151,10 +178,10 @@ export function SubAgentDraftForm({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.82fr)]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(18rem,0.7fr)]">
         <div className="space-y-4">
           <AgentSectionCard title="프로필">
-            <div className="grid gap-4 sm:grid-cols-[14rem_minmax(0,1fr)]">
+            <div className="grid gap-4 sm:grid-cols-[13rem_minmax(0,1fr)]">
               <div aria-label="프로필 이미지">
                 <SubAgentImageStepper
                   profileImage={profileImage}
@@ -306,42 +333,37 @@ export function SubAgentDraftForm({
                 onChange={(value) => setAdapterType(normalizeSubAgentAdapterType(value))}
               />
             </Field>
-            {adapterType === 'openai' ? (
-              <Field label="모델">
-                {authenticatedReady && modelOptionsLoading && (
-                  <span className="text-muted-foreground mb-1 inline-flex items-center gap-1.5 text-xs">
-                    조회 중
-                  </span>
-                )}
-                {authenticatedReady && modelOptionsError ? (
-                  <p className="text-destructive text-sm">{modelOptionsError}</p>
-                ) : (
-                  <AgentModelDropdown
-                    value={modelDraft}
-                    options={visibleModelOptions}
-                    onChange={(modelId) => {
-                      setModelDraft(modelId)
-                      setSelectedFamily(inferModelFamily(modelId))
-                    }}
-                    allowDefault
-                    placeholder={getDefaultModel()}
-                  />
-                )}
-              </Field>
-            ) : null}
+            <Field label="모델">
+              {authenticatedReady && modelOptionsLoading && (
+                <span className="text-muted-foreground mb-1 inline-flex items-center gap-1.5 text-xs">
+                  조회 중
+                </span>
+              )}
+              {authenticatedReady && modelOptionsError ? (
+                <p className="text-destructive text-sm">{modelOptionsError}</p>
+              ) : (
+                <AgentModelDropdown
+                  value={modelDraft}
+                  options={visibleModelOptions}
+                  onChange={(modelId) => {
+                    setModelDraft(modelId)
+                  }}
+                  allowDefault
+                  placeholder={getDefaultModel(adapterType)}
+                />
+              )}
+            </Field>
           </AgentSectionCard>
         </div>
       </div>
 
       <div className="flex items-center justify-end gap-2 pt-2">
+        <Button type="button" size="sm" onClick={handleSave} disabled={!canSave}>
+          {initialAgent ? '에이전트 저장' : '에이전트 만들기'}
+        </Button>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           취소
         </Button>
-        <div className="flex items-center gap-2">
-          <Button type="button" size="sm" onClick={handleSave} disabled={!canSave}>
-            {initialAgent ? '에이전트 저장' : '에이전트 만들기'}
-          </Button>
-        </div>
       </div>
     </div>
   )

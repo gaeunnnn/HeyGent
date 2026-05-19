@@ -89,7 +89,7 @@ const MAIN_AGENT_ASSIGNEE = {
   id: 'CEO',
   name: '팀장 에이전트',
   icon: UserRound,
-  imageUrl: '/assets/agents/ceo/ceo_profile.png' as string | null,
+  imageUrl: '/assets/agents/ceo/ceo_profile_img.png' as string | null,
 } as const
 const EMPTY_WORK_ITEMS: WorkItem[] = []
 const EMPTY_WORK_LABELS: WorkLabel[] = []
@@ -1659,10 +1659,6 @@ function DeleteIssueDialog({
         </AlertDialogHeader>
         {deleteError ? <p className="text-destructive text-sm">{deleteError}</p> : null}
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={deleting}>취소</AlertDialogCancel>
-          <Button variant="outline" disabled={deleting} onClick={onDeleteOnlyParent}>
-            부모만 삭제
-          </Button>
           <Button variant="destructive" disabled={deleting} onClick={onDeleteWithChildren}>
             {deleting ? (
               <>
@@ -1673,6 +1669,10 @@ function DeleteIssueDialog({
               '하위까지 삭제'
             )}
           </Button>
+          <Button variant="outline" disabled={deleting} onClick={onDeleteOnlyParent}>
+            부모만 삭제
+          </Button>
+          <AlertDialogCancel disabled={deleting}>취소</AlertDialogCancel>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

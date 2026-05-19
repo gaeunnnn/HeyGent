@@ -13,6 +13,7 @@ from app.api.session_agent_profiles import (
     agent_profile_prompt_payload as _agent_profile_prompt_payload,
     instruction_bundle_prompt_payload as _instruction_bundle_prompt_payload,
     profile_model as _profile_model,
+    profile_provider_name as _profile_provider_name,
 )
 from app.api.deps.http_auth import authenticate_http_user, ensure_owner
 from app.api.deps.openapi_auth import document_bearer_auth
@@ -80,7 +81,7 @@ _PROTECTED_SESSION_METADATA_KEYS = {
 }
 _SESSION_METADATA_PATCH_ALLOWLIST = {"pinned", "color", "tags", "description", "lastViewedAt", "last_viewed_at", "ui"}
 _SESSION_SETTINGS_ALLOWLIST = {"model", "systemPrompt", "system_prompt", "toolsets", "delegationPolicy", "delegation_policy"}
-_PUBLIC_SESSION_TOOLSETS = {"skills", "session", "planning", "web", "work", "messaging", "safe"}
+_PUBLIC_SESSION_TOOLSETS = {"skills", "session", "planning", "web", "work", "messaging", "design", "prototype", "safe"}
 
 
 @router.post(
@@ -383,6 +384,9 @@ async def _create_message_in_session(
     effective_model = str(profile_model or settings_snapshot.get("model") or payload.model or "").strip() or None
     if effective_model:
         task_input["model"] = effective_model
+    profile_provider = _profile_provider_name(main_profile) if main_profile is not None else None
+    if profile_provider:
+        task_input["provider_name"] = profile_provider
     task_transcript_session_id = _create_task_transcript_session(
         session_store,
         session_id=sessionId,
@@ -444,6 +448,8 @@ async def _create_message_in_session(
     task_input["after_user_message_version"] = user_append["after_user_message_version"]
     task_input["completion_expected_version"] = user_append["completion_expected_version"]
     task_input["client_message_id"] = client_message_id
+    task_input["prompt_message_id"] = str(user_append["message_id"])
+    task_input["promptMessageId"] = str(user_append["message_id"])
     if work_id is not None:
         try:
             WorkService(request.app.state.work_repository).mark_run_started(
@@ -630,6 +636,12 @@ async def _finish_created_session_message(
             task_run_id=task.task_run_id,
             user_message_id=str(user_append["message_id"]),
             assistant_message_id=str(assistant_message_id),
+            model=str((task.input_payload or {}).get("model") or "") or None,
+            provider_name=str(
+                (task.input_payload or {}).get("provider_name")
+                or (task.input_payload or {}).get("providerName")
+                or ""
+            ) or None,
         )
         mark_used_observation = await mark_used_recalled_memories(
             app_state=request.app.state,
@@ -766,6 +778,9 @@ def _attach_target_agent_context(state: Any, *, task_input: dict[str, Any], work
     profile_model = _profile_model(profile)
     if profile_model:
         task_input["model"] = profile_model
+    profile_provider = _profile_provider_name(profile)
+    if profile_provider:
+        task_input["provider_name"] = profile_provider
     profile_id = str(profile.get("profile_id") or assignee_agent_id)
     _attach_effective_skill_names(
         state,
@@ -1012,6 +1027,12 @@ async def _dispatch_work_wake(request: Request, *, user, wake):
     if work is None:
         return repository.complete_work_wake(wake.wake_id, status="skipped", last_error="work not found")
     if work.active_run_id:
+        if getattr(wake, "reason", None) in {"blockers_resolved", "children_completed"}:
+            return repository.complete_work_wake(
+                wake.wake_id,
+                status="skipped",
+                last_error="work already has an active run; wake coalesced",
+            )
         if int(getattr(wake, "attempts", 0) or 0) < MAX_WAKE_ATTEMPTS:
             return repository.complete_work_wake(
                 wake.wake_id,
@@ -1020,6 +1041,12 @@ async def _dispatch_work_wake(request: Request, *, user, wake):
                 retry_delay_seconds=30,
             )
         return repository.complete_work_wake(wake.wake_id, status="skipped", last_error="work already has an active run")
+    if _work_advanced_after_wake(work, wake):
+        return repository.complete_work_wake(
+            wake.wake_id,
+            status="skipped",
+            last_error="work already advanced after wake was queued",
+        )
     if work.status not in {"todo", "in_progress", "in_review", "blocked"}:
         return repository.complete_work_wake(wake.wake_id, status="skipped", last_error=f"work status is {work.status}")
     unresolved = service.unresolved_blocker_work_ids(work.work_id)
@@ -1056,6 +1083,24 @@ async def _dispatch_work_wake(request: Request, *, user, wake):
         return repository.complete_work_wake(wake.wake_id, status="failed", last_error=str(error))
     # wake는 실행 요청을 만든 뒤 끝난다. 실제 완료/실패 판정은 연결된 WorkRun이 담당한다.
     return repository.complete_work_wake(wake.wake_id, status="dispatched", task_run_id=message.task_run_id)
+
+
+def _work_advanced_after_wake(work: WorkItem, wake) -> bool:
+    if getattr(wake, "reason", None) not in {"blockers_resolved", "children_completed"}:
+        return False
+    latest_run_id = getattr(work, "latest_run_id", None)
+    if not latest_run_id:
+        return False
+    if latest_run_id == getattr(wake, "requested_by_task_run_id", None):
+        return False
+    work_updated_at = getattr(work, "updated_at", None)
+    wake_created_at = getattr(wake, "created_at", None)
+    if work_updated_at is None or wake_created_at is None:
+        return False
+    try:
+        return work_updated_at > wake_created_at
+    except TypeError:
+        return False
 
 
 def _user_for_work_wake(work: WorkItem, session: dict[str, Any]):

@@ -56,7 +56,7 @@ class PairingControllerTest {
         mockMvc.perform(post("/api/v1/iot/pairing/start")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(new DisplayPairingStartRequest(
-                    "deskmate-c3-a1b2c3",
+                    "heygent-c3-a1b2c3",
                     "nonce-001",
                     "0.1.0"
                 ))))
@@ -67,12 +67,12 @@ class PairingControllerTest {
 
     @Test
     void statusIsAllowedWithoutAuthentication() throws Exception {
-        when(devicePairingService.status("deskmate-c3-a1b2c3"))
-            .thenReturn(DevicePairingStatusResponse.unpaired("deskmate-c3-a1b2c3"));
+        when(devicePairingService.status("heygent-c3-a1b2c3"))
+            .thenReturn(DevicePairingStatusResponse.unpaired("heygent-c3-a1b2c3"));
 
-        mockMvc.perform(get("/api/v1/iot/pairing/devices/{deviceId}/status", "deskmate-c3-a1b2c3"))
+        mockMvc.perform(get("/api/v1/iot/pairing/devices/{deviceId}/status", "heygent-c3-a1b2c3"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data.deviceId").value("deskmate-c3-a1b2c3"))
+            .andExpect(jsonPath("$.data.deviceId").value("heygent-c3-a1b2c3"))
             .andExpect(jsonPath("$.data.paired").value(false))
             .andExpect(jsonPath("$.data.status").value("UNPAIRED"));
     }

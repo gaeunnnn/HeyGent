@@ -25,7 +25,7 @@
 - web/browser toolset을 runtime catalog, local runtime, delegate worker 기본 toolset에 연결했다.
 - 검색 공급자 키가 없는 개발 환경에서도 OpenAI API 키로 웹 검색이 가능하도록 OpenAI hosted web search fallback을 추가했다.
 - worker 위임 시 모델이 `web_search`, `web_extract` 같은 도구 이름을 toolset으로 넣어도 `web` toolset으로 정규화하도록 보강했다.
-- `Hermes`, `원본`, `호환용` 같은 표현을 새 tool 코드와 테스트명에서 제거하고, 상단 주석을 도구 역할 중심 설명으로 바꿨다.
+- 출처나 임시 호환 중심 표현을 새 tool 코드와 테스트명에서 제거하고, 상단 주석을 도구 역할 중심 설명으로 바꿨다.
 
 ## 주요 파일
 

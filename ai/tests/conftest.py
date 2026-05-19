@@ -22,6 +22,45 @@ class NoopWorkRepository:
         return None
 
 
+class InMemoryPrototypeArtifactRepository:
+    def __init__(self) -> None:
+        self.active_by_session: dict[tuple[str, str], dict] = {}
+
+    def create_artifact_version(self, **kwargs):
+        key = (kwargs["session_id"], kwargs["owner_key"])
+        previous = self.active_by_session.get(key)
+        version_number = int(previous.get("version_number", 0)) + 1 if previous else 1
+        artifact_id = previous["artifact_id"] if previous else f"artifact_{len(self.active_by_session) + 1}"
+        version_id = f"version_{artifact_id}_{version_number}"
+        record = {
+            "artifact_id": artifact_id,
+            "version_id": version_id,
+            "session_id": kwargs["session_id"],
+            "owner_key": kwargs["owner_key"],
+            "title": kwargs["title"],
+            "framework": kwargs["framework"],
+            "styling": kwargs["styling"],
+            "design_preset_id": kwargs["design_preset_id"],
+            "entry_file": kwargs["entry_file"],
+            "files": kwargs["files"],
+            "version_number": version_number,
+            "summary": kwargs["summary"],
+            "created_at": "2026-05-15T00:00:00Z",
+            "updated_at": "2026-05-15T00:00:00Z",
+        }
+        self.active_by_session[key] = record
+        return record
+
+    def get_active_artifact(self, *, session_id: str, owner_key: str):
+        return self.active_by_session.get((session_id, owner_key))
+
+    def get_version_code(self, *, session_id: str, owner_key: str, artifact_id: str, version_id: str):
+        record = self.active_by_session.get((session_id, owner_key))
+        if record and record["artifact_id"] == artifact_id and record["version_id"] == version_id:
+            return record
+        return None
+
+
 class FakeBackendAuthClient:
     async def verify_access_token(self, access_token: str, *, workspace_key: str | None = None) -> BackendAuthVerifyResult:
         return BackendAuthVerifyResult(user_id=access_token, workspace_key=workspace_key)
@@ -182,7 +221,8 @@ def _patch_app_runtime(app_main, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_main, "connect_postgres", lambda _dsn: None)
     monkeypatch.setattr(app_main, "PostgresTaskRepository", lambda _connection_factory: InMemoryTaskRepository())
     monkeypatch.setattr(app_main, "PostgresSessionStore", lambda _connection_factory: InMemoryTranscriptStore())
-    monkeypatch.setattr(app_main, "PostgresAgentRepository", lambda _connection_factory: InMemoryAgentRepository())
+    monkeypatch.setattr(app_main, "PostgresAgentRepository", lambda _connection_factory, **_kwargs: InMemoryAgentRepository())
+    monkeypatch.setattr(app_main, "PostgresPrototypeArtifactRepository", lambda _connection_factory: InMemoryPrototypeArtifactRepository())
     monkeypatch.setattr(app_main, "PostgresWorkRepository", lambda _connection_factory: NoopWorkRepository())
     monkeypatch.setattr(app_main, "PostgresSkillRepository", lambda _connection_factory: InMemorySkillRepository())
     monkeypatch.setattr(app_main, "build_task_projection_store", lambda **_kwargs: RedisTaskProjectionStore(FakeRedis(), ttl_seconds=60))

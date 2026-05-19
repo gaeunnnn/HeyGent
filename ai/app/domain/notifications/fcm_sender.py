@@ -43,7 +43,7 @@ try:
         *,
         session_id: str,
         content: str,
-        title: str = "Gentleman AI 응답",
+        title: str = "HeyGent 응답",
     ) -> None:
         """AI 응답 완료 시 모바일 앱에 FCM 푸시 알림을 전송한다."""
         app = _get_app()
@@ -74,6 +74,6 @@ except ImportError:
         *,
         session_id: str,
         content: str,
-        title: str = "Gentleman AI 응답",
+        title: str = "HeyGent 응답",
     ) -> None:
         pass

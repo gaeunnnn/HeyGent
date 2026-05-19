@@ -8,6 +8,8 @@ from typing import Any, Protocol
 
 from app.api.memory_observation import MEMORY_CONTEXT_META_KEY, build_recall_observation
 from app.clients.backend_memory import BackendMemoryClientError
+from app.domain.orchestration.agent.memory.provider_retry import memory_provider_error_details
+from app.domain.orchestration.agent.memory.runtime_context import memory_provider_runtime_context_from_task_input
 from app.domain.orchestration.prompts.persistent_memory_prompt import build_persistent_memory_prompt
 
 logger = logging.getLogger(__name__)
@@ -25,17 +27,21 @@ Return strict JSON only, with this shape:
 Rules:
 - Skip recall for greetings, thanks, or trivial requests. If user or project history could change, personalize, or improve the answer, recall it even when the current input is answerable on its own.
 - Use USER_PROFILE/PREFERENCE/GLOBAL/preference for stable user style, format, or preference.
+- Requests about what to call the user, preferred name, nickname, addressing, likes, dislikes, or saved personal preferences should recall USER_PROFILE/PREFERENCE/GLOBAL/preference.
 - Use USER_PROFILE/PROFILE/GLOBAL/profile for user role, identity, or working habit.
 - Do not skip open-ended recommendations, suggestions, choices, or "what should I do/eat/use" questions. These should recall USER_PROFILE/PREFERENCE/GLOBAL/preference because preferences may materially change the answer.
 - Use AGENT_MEMORY/FACT/GLOBAL/event,fact,reason for recent events, temporary constraints, health/diet restrictions, situational limitations, or other non-durable facts that should affect the current recommendation.
+- Use AGENT_MEMORY/FACT/GLOBAL/fact,event for current user situations embedded in task requests, such as interview preparation, job search status, travel plans, health constraints, schedule constraints, or temporary workload. These are not PROFILE unless they describe durable identity or habit.
 - Use AGENT_MEMORY/FACT/WORKSPACE/task_state,fact for continuing project implementation or current project state.
 - Use AGENT_MEMORY/INSTRUCTION/GLOBAL/instruction,procedure for durable user instructions about how the assistant should answer or what process it should follow.
 - Use AGENT_MEMORY/PROCEDURE/procedure,instruction for reusable workflow or repeated project procedure.
 - Do not classify saved answer-format instructions, response workflows, or assistant behavior procedures as FACT/task_state. FACT/task_state is only for factual project/session state, not for how to respond.
 - Do not classify temporary restrictions, recent events, or situational facts as USER_PROFILE/PROFILE. PROFILE is only for durable identity, role, or habit.
+- If the user asks for a plan, recommendation, or advice based on a current situation, recall related FACT/event memories in addition to preference memories when useful.
 - Use reason/event categories when the user asks why, history, records, schedule, or previous event context.
 - If multiple memory classes could materially affect the answer, keep the primary plan narrow and add additionalRecallPlans for the other classes. For example, retrieve durable user preferences separately from reusable assistant instructions or procedures when both could matter.
 - When the user asks the assistant to perform a task and a saved response workflow could control the answer structure, include an additional AGENT_MEMORY recall plan with memoryType INSTRUCTION or PROCEDURE and metadataCategories instruction,procedure.
+- For repeated agent workflows such as "지난번처럼 docs/logs 작업하고 커밋해줘", recall reusable PROCEDURE/INSTRUCTION memories instead of treating the request itself as new memory.
 - When both instruction and procedure memories could apply, avoid narrowing memoryType to only one of them; let metadataCategories instruction,procedure retrieve both.
 - If a request may need both user preference and project state, or both user preference and reusable instructions, avoid over-narrowing; use additionalRecallPlans or omit uncertain filters.
 - Do not use tags, sessionKey, or resourceId in this first implementation.
@@ -57,6 +63,13 @@ class MemoryRecallPlan:
     planner_source: str = "rule"
     fallback_reason: str | None = None
     planner_latency_ms: int | None = None
+    fallback_error_type: str | None = None
+    fallback_status_code: int | None = None
+    fallback_provider_name: str | None = None
+    fallback_selected_model: str | None = None
+    fallback_retry_attempts: int | None = None
+    fallback_max_attempts: int | None = None
+    fallback_provider_error_message: str | None = None
     additional_plans: tuple["MemoryRecallPlan", ...] = ()
 
     def filters(self) -> dict[str, Any]:
@@ -78,6 +91,8 @@ class MemoryRecallPlannerProvider(Protocol):
         query: str,
         workspace_key: str | None,
         rule_plan: MemoryRecallPlan,
+        model: str | None = None,
+        runtime_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the model-produced memory recall planning JSON."""
 
@@ -102,6 +117,8 @@ class LlmMemoryRecallPlanner:
         *,
         workspace_key: str | None = None,
         limit: int = DEFAULT_MEMORY_RECALL_LIMIT,
+        model: str | None = None,
+        runtime_context: dict[str, Any] | None = None,
     ) -> MemoryRecallPlan:
         rule_plan = plan_memory_recall(query, workspace_key=workspace_key, limit=limit)
         if not rule_plan.query:
@@ -114,6 +131,8 @@ class LlmMemoryRecallPlanner:
                     query=rule_plan.query,
                     workspace_key=workspace_key,
                     rule_plan=rule_plan,
+                    model=str(model or "").strip() or None,
+                    runtime_context=runtime_context,
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -130,7 +149,12 @@ class LlmMemoryRecallPlanner:
                 raise
             latency_ms = _elapsed_ms(started_at)
             logger.warning("LLM memory recall planner timed out; falling back to rule planner", exc_info=True)
-            return _fallback_rule_plan(rule_plan, reason="llm_planner_timeout", latency_ms=latency_ms)
+            return _fallback_rule_plan(
+                rule_plan,
+                reason="llm_planner_timeout",
+                latency_ms=latency_ms,
+                error_details=_memory_provider_meta(self._provider),
+            )
         except Exception as exc:
             if not self._fallback_to_rules:
                 raise
@@ -138,8 +162,9 @@ class LlmMemoryRecallPlanner:
             logger.warning("LLM memory recall planner failed; falling back to rule planner", exc_info=True)
             return _fallback_rule_plan(
                 rule_plan,
-                reason=f"llm_planner_error:{type(exc).__name__}",
+                reason=_planner_fallback_reason(exc),
                 latency_ms=latency_ms,
+                error_details=memory_provider_error_details(exc),
             )
 
 
@@ -285,7 +310,18 @@ async def attach_persistent_memory_context(
     clear_client_memory_context(task_input)
     recall_planner = getattr(app_state, "memory_recall_planner", None)
     if recall_planner is not None:
-        recall_plan = await recall_planner.plan_recall(query, workspace_key=workspace_key, limit=limit)
+        recall_plan = await recall_planner.plan_recall(
+            query,
+            workspace_key=workspace_key,
+            limit=limit,
+            model=_memory_provider_model(task_input),
+            runtime_context=memory_provider_runtime_context_from_task_input(
+                task_input,
+                user_id=user_id,
+                session_id=task_input.get("session_id") or task_input.get("sessionId"),
+                model=_memory_provider_model(task_input),
+            ),
+        )
     else:
         recall_plan = plan_memory_recall(query, workspace_key=workspace_key, limit=limit)
     if force_workspace_key and workspace_key and recall_plan.workspace_key is None:
@@ -477,6 +513,20 @@ def _with_recall_plan(recall_meta: dict[str, Any], recall_plan: MemoryRecallPlan
         enriched["planner"]["fallback_reason"] = recall_plan.fallback_reason
     if recall_plan.planner_latency_ms is not None:
         enriched["planner"]["latency_ms"] = recall_plan.planner_latency_ms
+    if recall_plan.fallback_error_type:
+        enriched["planner"]["fallback_error_type"] = recall_plan.fallback_error_type
+    if recall_plan.fallback_status_code is not None:
+        enriched["planner"]["fallback_status_code"] = recall_plan.fallback_status_code
+    if recall_plan.fallback_provider_name:
+        enriched["planner"]["fallback_provider_name"] = recall_plan.fallback_provider_name
+    if recall_plan.fallback_selected_model:
+        enriched["planner"]["fallback_selected_model"] = recall_plan.fallback_selected_model
+    if recall_plan.fallback_retry_attempts is not None:
+        enriched["planner"]["fallback_retry_attempts"] = recall_plan.fallback_retry_attempts
+    if recall_plan.fallback_max_attempts is not None:
+        enriched["planner"]["fallback_max_attempts"] = recall_plan.fallback_max_attempts
+    if recall_plan.fallback_provider_error_message:
+        enriched["planner"]["fallback_provider_error_message"] = recall_plan.fallback_provider_error_message
     if recall_plan.additional_plans:
         enriched["planner"]["additional_plans"] = [
             {
@@ -620,13 +670,40 @@ def _normalize_additional_llm_recall_plans(
     return tuple(plans)
 
 
-def _fallback_rule_plan(rule_plan: MemoryRecallPlan, *, reason: str, latency_ms: int) -> MemoryRecallPlan:
+def _fallback_rule_plan(
+    rule_plan: MemoryRecallPlan,
+    *,
+    reason: str,
+    latency_ms: int,
+    error_details: dict[str, Any] | None = None,
+) -> MemoryRecallPlan:
+    details = dict(error_details or {})
     return replace(
         rule_plan,
         planner_source="rule_fallback",
         fallback_reason=reason,
         planner_latency_ms=latency_ms,
+        fallback_error_type=details.get("error_type") if isinstance(details.get("error_type"), str) else None,
+        fallback_status_code=details.get("provider_status_code") if isinstance(details.get("provider_status_code"), int) else None,
+        fallback_provider_name=details.get("provider_name") if isinstance(details.get("provider_name"), str) else None,
+        fallback_selected_model=details.get("selected_model") if isinstance(details.get("selected_model"), str) else None,
+        fallback_retry_attempts=details.get("retry_attempts") if isinstance(details.get("retry_attempts"), int) else None,
+        fallback_max_attempts=details.get("max_attempts") if isinstance(details.get("max_attempts"), int) else None,
+        fallback_provider_error_message=details.get("provider_error_message") if isinstance(details.get("provider_error_message"), str) else None,
     )
+
+
+def _planner_fallback_reason(exc: BaseException) -> str:
+    details = memory_provider_error_details(exc)
+    status_code = details.get("provider_status_code")
+    if isinstance(status_code, int):
+        return f"llm_planner_http_error:{status_code}"
+    return f"llm_planner_error:{type(exc).__name__}"
+
+
+def _memory_provider_meta(provider: Any) -> dict[str, Any]:
+    meta = getattr(provider, "last_memory_provider_meta", None)
+    return dict(meta) if isinstance(meta, dict) else {}
 
 
 def _align_store_and_memory_type(store_type: str | None, memory_type: str | None) -> tuple[str | None, str | None]:
@@ -692,6 +769,11 @@ def _contains_any(text: str, hints: tuple[str, ...]) -> bool:
 def _put_if_present(payload: dict[str, Any], key: str, value: str | None) -> None:
     if value:
         payload[key] = value
+
+
+def _memory_provider_model(task_input: dict[str, Any]) -> str | None:
+    model = task_input.get("model") or task_input.get("provider_model") or task_input.get("providerModel")
+    return str(model or "").strip() or None
 
 
 def _elapsed_ms(started_at: float) -> int:

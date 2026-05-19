@@ -475,6 +475,93 @@ async def test_delegate_runtime_applies_profile_defaults_and_toolset_intersectio
 
 
 @pytest.mark.asyncio
+async def test_delegate_runtime_propagates_gemini_provider_to_worker_payload():
+    launcher = FakeChildSessionLauncher(
+        ChildSessionLaunchResult(
+            agent_id="agent_worker",
+            status=TaskStatus.COMPLETED,
+            summary="worker summary",
+        )
+    )
+    session_store = FakeWorkerSessionStore()
+    runtime = DelegateRuntime(launcher, session_store=session_store)
+    repository = FakeHandoffRepository()
+    repository.agent_profiles["worker.gemini"] = {
+        "profile_key": "worker.gemini",
+        "profile_id": "profile_worker_gemini",
+        "profile_version": 2,
+        "agent_type": "worker",
+        "config_snapshot": {
+            "model": "gemini-2.5-flash",
+            "providerName": "gemini_api_key",
+            "toolsets": ["terminal"],
+        },
+        "delegation_policy": {
+            "maxIterations": 12,
+        },
+    }
+    task = SimpleNamespace(task_run_id="task_parent", owner_key="user_1", session_key="session_1")
+    step = SimpleNamespace(step_run_id="step_parent", detail_json={})
+
+    await runtime.apply(
+        task=task,
+        step=step,
+        outcome={
+            "child_session": {
+                "goal": "Gemini worker 실행",
+                "metadata": {"profile_key": "worker.gemini"},
+            }
+        },
+        repository=repository,
+    )
+
+    created_session = session_store.created_sessions[0]
+    assert created_session["model"] == "gemini-2.5-flash"
+    assert created_session["metadata"]["provider_name"] == "gemini_api_key"
+
+    handoff = repository.created_handoffs[0]
+    assert handoff["input_payload"]["model"] == "gemini-2.5-flash"
+    assert handoff["input_payload"]["provider_name"] == "gemini_api_key"
+
+    launched_payload = launcher.launched[0]["input_payload"]
+    assert launched_payload["model"] == "gemini-2.5-flash"
+    assert launched_payload["provider_name"] == "gemini_api_key"
+    assert launched_payload["providerName"] == "gemini_api_key"
+
+
+@pytest.mark.asyncio
+async def test_delegate_runtime_infers_gemini_provider_from_worker_model():
+    launcher = FakeChildSessionLauncher(
+        ChildSessionLaunchResult(
+            agent_id="agent_worker",
+            status=TaskStatus.COMPLETED,
+            summary="worker summary",
+        )
+    )
+    runtime = DelegateRuntime(launcher, session_store=FakeWorkerSessionStore())
+    repository = FakeHandoffRepository()
+    task = SimpleNamespace(task_run_id="task_parent", owner_key="user_1", session_key="session_1")
+    step = SimpleNamespace(step_run_id="step_parent", detail_json={})
+
+    await runtime.apply(
+        task=task,
+        step=step,
+        outcome={
+            "child_session": {
+                "goal": "Gemini 추론 worker",
+                "model": "gemini-2.5-pro",
+                "metadata": {"profile_key": "worker.default"},
+            }
+        },
+        repository=repository,
+    )
+
+    launched_payload = launcher.launched[0]["input_payload"]
+    assert launched_payload["model"] == "gemini-2.5-pro"
+    assert launched_payload["provider_name"] == "gemini_api_key"
+
+
+@pytest.mark.asyncio
 async def test_delegate_runtime_applies_profile_hard_timeout_default():
     launcher = FakeChildSessionLauncher(
         ChildSessionLaunchResult(
@@ -491,7 +578,7 @@ async def test_delegate_runtime_applies_profile_hard_timeout_default():
         "profile_version": 2,
         "agent_type": "worker",
         "config_snapshot": {
-            "toolsets": ["skills", "terminal", "file", "web", "browser"],
+            "toolsets": ["skills", "terminal", "file", "web"],
         },
         "delegation_policy": {
             "hardTimeoutSeconds": 1200,
@@ -507,7 +594,7 @@ async def test_delegate_runtime_applies_profile_hard_timeout_default():
         outcome={
             "child_session": {
                 "goal": "profile timeout 적용",
-                "toolsets": ["web", "browser"],
+                "toolsets": ["web"],
                 "metadata": {"profile_key": "worker.timeout"},
             }
         },
@@ -518,7 +605,7 @@ async def test_delegate_runtime_applies_profile_hard_timeout_default():
     launched_payload = launcher.launched[0]["input_payload"]
     assert handoff["input_payload"]["hard_timeout_seconds"] == 1200
     assert launched_payload["hardTimeoutSeconds"] == 1200
-    assert launched_payload["enabled_toolsets"] == ["web", "browser"]
+    assert launched_payload["enabled_toolsets"] == ["web"]
 
 
 @pytest.mark.asyncio

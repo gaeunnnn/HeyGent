@@ -65,6 +65,11 @@ class MemoryReconciliationContext:
     user_id: str
     user_message: str
     workspace_key: str | None = None
+    session_id: str | None = None
+    task_run_id: str | None = None
+    step_run_id: str | None = None
+    provider_name: str | None = None
+    model: str | None = None
 
 
 class MemoryOperationReconciler:

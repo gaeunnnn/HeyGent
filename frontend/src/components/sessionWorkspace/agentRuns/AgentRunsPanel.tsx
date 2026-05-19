@@ -177,9 +177,21 @@ function buildVisibleRunItem(
   taskFlow?: TaskRunFlowResponse | null,
 ): AgentRunItemData {
   const inputPayload = toRecord(taskDetail?.input_payload)
+  const resultPayload = toRecord(taskDetail?.result_payload)
+  const model =
+    getStringValue(inputPayload, 'model', 'provider_model', 'providerModel') ??
+    getStringValue(resultPayload, 'model') ??
+    getStringValue(toRecord(resultPayload?.metadata), 'model') ??
+    run.model
+  const provider =
+    getStringValue(inputPayload, 'provider_name', 'providerName', 'provider') ??
+    getStringValue(resultPayload, 'provider_name', 'providerName', 'provider') ??
+    run.adapter
   return {
     ...run,
     status: getEffectiveRunStatus(run, taskDetail, taskFlow),
+    adapter: getRunAdapterLabel(provider, model) ?? run.adapter,
+    model,
     delegationInput:
       run.delegationInput ?? buildDelegationInput(inputPayload, taskDetail?.displayContext),
   }
@@ -850,6 +862,14 @@ function getStringValue(source: unknown, ...keys: string[]) {
     if (typeof value === 'string' && value.trim() !== '') return value.trim()
   }
   return undefined
+}
+
+function getRunAdapterLabel(provider?: string | null, model?: string | null) {
+  const providerText = (provider ?? '').trim().toLowerCase()
+  const modelText = (model ?? '').trim().toLowerCase()
+  if (providerText.includes('gemini') || modelText.startsWith('gemini-')) return 'gemini'
+  if (providerText.includes('openai') || modelText.startsWith('gpt-')) return 'openai'
+  return providerText || undefined
 }
 
 function compactLongText(value: string) {

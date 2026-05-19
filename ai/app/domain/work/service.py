@@ -131,7 +131,7 @@ class WorkService:
                     task_run_id=task.task_run_id,
                     body=_work_disposition_comment_body(status=status, disposition=disposition or {}),
                     metadata={
-                        "reason": "work_disposition",
+                        "reason": "work_disposition_metadata",
                         "status": status,
                         "summary": str((disposition or {}).get("summary") or "").strip(),
                         "nextAction": str(
@@ -176,7 +176,7 @@ class WorkService:
                 title="작업 종료 상태 확인 필요",
                 body=(
                     "실행은 완료됐지만 작업 종료 상태가 명시되지 않았습니다. "
-                    "done, cancelled, in_review, blocked, todo 중 하나로 work_disposition을 남겨야 합니다."
+                    "done, cancelled, in_review, blocked, todo 중 하나로 workDisposition을 남겨야 합니다."
                 ),
                 payload={
                     "reason": "missing_work_disposition",

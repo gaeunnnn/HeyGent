@@ -88,7 +88,7 @@ def _patch_respond_sequence(monkeypatch, responses: list[AgentModelResponse]) ->
     monkeypatch.setattr("app.domain.providers.model.openai_api.OpenAIAPIProvider.respond_async", fake_respond_async)
 
 
-def _model_text_response(*, model: str, text: str) -> AgentModelResponse:
+def _model_text_response(*, model: str, text: str, work_disposition: dict | None = None) -> AgentModelResponse:
     return AgentModelResponse(
         provider_name="openai_api",
         model=model,
@@ -97,6 +97,8 @@ def _model_text_response(*, model: str, text: str) -> AgentModelResponse:
         tool_calls=[],
         finish_reason="stop",
         metadata={"model": model},
+        work_disposition=work_disposition,
+        visible_text=text,
     )
 
 
@@ -266,6 +268,38 @@ def test_ws_session_message_create_attaches_backend_memory_context(client, monke
         context.__exit__(None, None, None)
 
 
+def test_ws_session_message_create_resends_snapshot_after_memory_observation(client, monkeypatch):
+    _patch_respond(monkeypatch, text="WS_MEMORY_OBSERVATION_DONE")
+    context, websocket = _authenticated_socket(client, user_id="ws-memory-observation-owner")
+    try:
+        websocket.send_json(
+            {
+                "protocolVersion": 1,
+                "type": "session.message.create",
+                "requestId": "req_memory_observation",
+                "payload": {
+                    "content": "나 국수 좋아해",
+                    "clientMessageId": "client_msg_memory_observation_1",
+                    "model": "gpt-test",
+                },
+            }
+        )
+
+        accepted = websocket.receive_json()
+        assert accepted["type"] == "session.message.accepted"
+        completed = _receive_until(websocket, "session.message.completed")
+        assert completed["payload"]["content"] == "WS_MEMORY_OBSERVATION_DONE"
+
+        snapshot = _receive_until(websocket, "taskRun.snapshot.result")
+        task_payload = snapshot["payload"]["task"]
+        observation = task_payload["result_payload"]["memory_observation"]
+        assert task_payload["task_run_id"] == accepted["payload"]["task_run_id"]
+        assert observation["writeback"]["status"] == "no_candidates"
+        assert observation["mark_used"]["status"] == "skipped"
+    finally:
+        context.__exit__(None, None, None)
+
+
 def test_ws_followup_message_passes_previous_public_messages_without_current_user(client, monkeypatch):
     provider_calls: list[dict] = []
 
@@ -400,7 +434,7 @@ def test_ws_list_snapshot_and_replay_happy_path(client, monkeypatch):
         task_run_id = completed["payload"]["task_run_id"]
 
         websocket.send_json({"protocolVersion": 1, "type": "session.list", "requestId": "req_sessions", "payload": {}})
-        sessions = websocket.receive_json()
+        sessions = _receive_command_frame(websocket, "session.list.result", "req_sessions")
         assert sessions["type"] == "session.list.result"
         assert sessions["requestId"] == "req_sessions"
         assert [item["session_id"] for item in sessions["payload"]["items"]] == [session_id]
@@ -413,7 +447,7 @@ def test_ws_list_snapshot_and_replay_happy_path(client, monkeypatch):
                 "payload": {"sessionId": session_id},
             }
         )
-        messages = websocket.receive_json()
+        messages = _receive_command_frame(websocket, "session.messages.list.result", "req_messages")
         assert messages["type"] == "session.messages.list.result"
         assert messages["type"] != "session.messages.result"
         assert messages["requestId"] == "req_messages"
@@ -429,13 +463,13 @@ def test_ws_list_snapshot_and_replay_happy_path(client, monkeypatch):
                 "payload": {"taskRunId": task_run_id, "includeSteps": True},
             }
         )
-        snapshot = websocket.receive_json()
+        snapshot = _receive_command_frame(websocket, "taskRun.snapshot.result", "req_snapshot")
         assert snapshot["type"] == "taskRun.snapshot.result"
         assert snapshot["requestId"] == "req_snapshot"
         assert snapshot["payload"]["task"]["task_run_id"] == task_run_id
         assert snapshot["payload"]["task_run"]["task_run_id"] == task_run_id
-        assert snapshot["payload"]["steps"] == []
-        assert snapshot["payload"]["step_runs"] == []
+        assert len(snapshot["payload"]["steps"]) == 1
+        assert len(snapshot["payload"]["step_runs"]) == 1
         assert snapshot["payload"]["approvals"] == []
         assert snapshot["payload"]["events"]
         assert snapshot["payload"]["events"][0]["task_run_id"] == task_run_id
@@ -448,7 +482,7 @@ def test_ws_list_snapshot_and_replay_happy_path(client, monkeypatch):
                 "payload": {"taskRunId": task_run_id, "afterSequence": 0},
             }
         )
-        replay = websocket.receive_json()
+        replay = _receive_command_frame(websocket, "taskRun.events.replay.result", "req_replay")
         assert replay["type"] == "taskRun.events.replay.result"
         assert replay["requestId"] == "req_replay"
         assert replay["payload"]["events"]
@@ -470,21 +504,6 @@ def test_ws_session_agent_task_child_taskrun_can_be_subscribed_snapshotted_and_r
                 model="gpt-test",
                 tool_calls=[
                     _tool_call(
-                        "call-step-1",
-                        "step",
-                        {
-                            "steps": [
-                                {
-                                    "id": "delegate-k-service",
-                                    "title": "분실물 대응 배정",
-                                    "summary": "K-에이전트에게 지하철 유실물 안내를 맡깁니다.",
-                                    "goal": "K-에이전트에게 강남역 지갑 분실 대응을 맡긴다.",
-                                    "status": "in_progress",
-                                }
-                            ]
-                        },
-                    ),
-                    _tool_call(
                         "call-session-agent-1",
                         "session_agent_task",
                         {
@@ -497,17 +516,11 @@ def test_ws_session_agent_task_child_taskrun_can_be_subscribed_snapshotted_and_r
                     ),
                 ],
             ),
-            _model_tool_response(
+            _model_text_response(
                 model="gpt-test",
-                tool_calls=[
-                    _tool_call(
-                        "call-child-disposition-1",
-                        "work_disposition",
-                        {"status": "done", "summary": "지하철 유실물 확인 절차를 정리했습니다."},
-                    )
-                ],
+                text="CHILD_DONE",
+                work_disposition={"status": "done", "summary": "지하철 유실물 확인 절차를 정리했습니다."},
             ),
-            _model_text_response(model="gpt-test", text="CHILD_DONE"),
             _model_text_response(model="gpt-test", text="PARENT_DONE"),
         ],
     )
@@ -1515,8 +1528,8 @@ def test_ws_new_session_message_augments_toolsets_for_enabled_skill(client, monk
 
         assert task is not None
         assert "korea-weather" in task.input_payload["enabledSkillNames"]
-        assert task.input_payload["enabled_toolsets"] == ["skills", "web"]
-        assert task.input_payload["toolsets"] == ["skills", "web"]
+        assert task.input_payload["enabled_toolsets"] == ["skills", "web", "tool-result"]
+        assert task.input_payload["toolsets"] == ["skills", "web", "tool-result"]
     finally:
         context.__exit__(None, None, None)
 
@@ -1565,7 +1578,8 @@ def test_ws_main_agent_skill_keeps_default_local_toolsets(client, monkeypatch):
         assert task is not None
         assert "mattermost-send" in task.input_payload["enabledSkillNames"]
         enabled_toolsets = set(task.input_payload["enabled_toolsets"])
-        assert {"file", "terminal", "browser", "messaging"}.issubset(enabled_toolsets)
+        assert {"file", "terminal", "messaging"}.issubset(enabled_toolsets)
+        assert "browser" not in enabled_toolsets
     finally:
         context.__exit__(None, None, None)
 

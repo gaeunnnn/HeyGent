@@ -44,7 +44,7 @@ class FcmMessagingService : FirebaseMessagingService() {
 
         val title = message.notification?.title
             ?: message.data["title"]
-            ?: "Gentleman AI"
+            ?: "HeyGent"
         val body = message.notification?.body
             ?: message.data["body"]
             ?: "새 AI 응답이 도착했습니다."

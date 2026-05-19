@@ -132,14 +132,25 @@ async def test_mark_used_posts_source_task_run_id_for_idempotency():
 @pytest.mark.asyncio
 async def test_recall_raises_on_backend_error_status():
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"status": 401, "message": "invalid token"})
+        return httpx.Response(
+            401,
+            json={
+                "status": 401,
+                "code": "INVALID_INTERNAL_TOKEN",
+                "message": "invalid token",
+            },
+        )
 
     settings = Settings(backend_base_url="http://backend", internal_service_token="bad-token")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         client = BackendMemoryClient(settings=settings, http_client=http_client)
 
-        with pytest.raises(BackendMemoryClientError, match="401"):
+        with pytest.raises(BackendMemoryClientError, match="401") as exc_info:
             await client.recall(user_id="1", query="회의록")
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.error_code == "INVALID_INTERNAL_TOKEN"
+    assert exc_info.value.response_message == "invalid token"
 
 
 @pytest.mark.asyncio

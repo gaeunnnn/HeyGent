@@ -204,6 +204,21 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS ai_agent_secret_values (
+        secret_value_id TEXT PRIMARY KEY,
+        owner_key TEXT NOT NULL,
+        owner_user_id BIGINT REFERENCES users(id),
+        profile_id TEXT NOT NULL REFERENCES ai_agent_profiles(profile_id) ON DELETE CASCADE,
+        document_key TEXT NOT NULL,
+        section_key TEXT NOT NULL,
+        secret_key TEXT NOT NULL,
+        encrypted_value TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (profile_id, document_key, section_key, secret_key)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS ai_skill_catalog (
         skill_id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -238,6 +253,39 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (profile_id, skill_id)
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS session_prototype_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+        owner_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        framework TEXT NOT NULL DEFAULT 'react' CHECK (framework IN ('react', 'html')),
+        styling TEXT NOT NULL DEFAULT 'css' CHECK (styling IN ('css', 'tailwind', 'mixed')),
+        design_preset_id TEXT,
+        active_version_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS session_prototype_artifact_versions (
+        version_id TEXT PRIMARY KEY,
+        artifact_id TEXT NOT NULL REFERENCES session_prototype_artifacts(artifact_id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+        owner_key TEXT NOT NULL,
+        version_number INTEGER NOT NULL,
+        prompt_message_id TEXT,
+        task_run_id TEXT,
+        files_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        entry_file TEXT NOT NULL DEFAULT '/src/App.tsx',
+        summary TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (artifact_id, version_number)
     );
     """,
     """
@@ -597,6 +645,10 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
     ON ai_agent_instruction_documents(bundle_id, document_key);
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_ai_agent_secret_values_profile
+    ON ai_agent_secret_values(profile_id, document_key, section_key);
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_ai_skill_catalog_source
     ON ai_skill_catalog(source_type, name);
     """,
@@ -607,6 +659,15 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
     """
     CREATE INDEX IF NOT EXISTS idx_ai_agent_skill_settings_profile_enabled
     ON ai_agent_skill_settings(profile_id, enabled);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_session_prototype_artifacts_active
+    ON session_prototype_artifacts(session_id, owner_key, updated_at DESC)
+    WHERE is_active = true;
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_session_prototype_artifact_versions_artifact
+    ON session_prototype_artifact_versions(artifact_id, version_number DESC);
     """,
     """
     INSERT INTO ai_agent_profiles (
@@ -625,7 +686,7 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
             'main.default',
             1,
             'main',
-            '{"promptRole":"main","toolsets":["skills","session","planning","terminal","file","web","browser","delegation"]}'::jsonb,
+            '{"promptRole":"main","toolsets":["skills","session","planning","terminal","file","web","delegation"]}'::jsonb,
             '{"canDelegate":true,"maxWorkerDepth":1,"maxConcurrentWorkers":3}'::jsonb
         ),
         (
@@ -634,7 +695,7 @@ POSTGRES_SCHEMA_STATEMENTS: list[str] = [
             'worker.default',
             1,
             'worker',
-            '{"promptRole":"worker","toolsets":["skills","terminal","file","web","browser"]}'::jsonb,
+            '{"promptRole":"worker","toolsets":["skills","terminal","file","web"]}'::jsonb,
             '{"canDelegate":false,"maxWorkerDepth":0,"hardTimeoutSeconds":900,"maxIterations":80}'::jsonb
         )
     ON CONFLICT (owner_key, profile_key, profile_version) DO UPDATE

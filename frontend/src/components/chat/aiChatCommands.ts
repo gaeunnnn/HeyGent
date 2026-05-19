@@ -119,7 +119,7 @@ export const sendSessionMessageCreate = ({
     let completedSeen = false
     let trackedTaskRunId: string | undefined
     let trackedAssistantMessageId: string | undefined
-    let streamTimer: ReturnType<typeof window.setTimeout> | null = null
+    let streamTimer: number | null = null
 
     const clearStreamTimer = () => {
       if (streamTimer !== null) {

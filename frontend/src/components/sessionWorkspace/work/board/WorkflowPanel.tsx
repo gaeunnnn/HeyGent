@@ -1,11 +1,8 @@
 import { useMemo } from 'react'
 import { Bot, UserRound } from 'lucide-react'
 import { useSessionStore } from '@/store/useSessionStore'
-import {
-  agentProfilesToPanelItems,
-  createDefaultSessionAgents,
-  listSessionAgents,
-} from '@/apis/agents'
+import { agentProfilesToPanelItems, createDefaultSessionAgents } from '@/apis/agents'
+import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import type { BoardAssignee } from './issueBoardPanelTypes'
 import { WorkflowTemplateEditor } from './WorkflowTemplateEditor'
 
@@ -13,7 +10,7 @@ const MAIN_AGENT_ASSIGNEE: BoardAssignee = {
   id: 'CEO',
   name: '팀장 에이전트',
   icon: UserRound,
-  imageUrl: '/assets/agents/ceo/ceo_profile.png',
+  imageUrl: '/assets/agents/ceo/ceo_profile_img.png',
 }
 
 const EMPTY_AGENT_PANELS: ReturnType<
@@ -40,7 +37,9 @@ export function WorkflowPanel({ sessionId }: { sessionId: string }) {
 
   const ensureDefaultFlowAgents = async (): Promise<BoardAssignee[]> => {
     await createDefaultSessionAgents(sessionId)
-    const profiles = await listSessionAgents(sessionId)
+    // 기본 에이전트들이 새로 생성됐으므로 캐시 무효화 후 fresh fetch.
+    useAgentCacheStore.getState().invalidateSessionAgents(sessionId)
+    const profiles = await useAgentCacheStore.getState().fetchSessionAgents(sessionId)
     const panels = agentProfilesToPanelItems(profiles)
     setAgentPanelsForSession(sessionId, panels)
     return [

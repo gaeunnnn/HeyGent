@@ -9,6 +9,7 @@ metadata:
       - web-search-fallback
       - parallel-cli
       - korea-weather
+      - srt-booking
       - joseon-sillok-search
       - library-book-search
       - household-waste-info
@@ -29,7 +30,6 @@ This skill is a discovery guide. It does not replace the target skill. After cho
 - `web`: Web search, scraping, domain intelligence, and academic paper search.
 - `research`: Parallel command-line research and blog monitoring.
 - `software-development`: Planning and subagent-driven development guidance.
-- `browser`: Browser UX flow review.
 - `mcp`: Native MCP integration.
 - `messaging`: External messaging integrations.
 - `k-skills`: Korean public data, Korean local information, Korean search surfaces, and Korean text utilities.
@@ -50,8 +50,6 @@ Read `blogwatcher` when the user asks to monitor or summarize blog feeds.
 
 Read `writing-plans` or `subagent-driven-development` for software planning and delegated development workflows.
 
-Read `ux-flow-review` when the user asks to inspect a browser flow or review UX behavior.
-
 Read `native-mcp` when the user asks about MCP tool or server integration.
 
 Read `mattermost-send` when the user explicitly asks to send, share, post, or publish a message to Mattermost or a configured channel alias.
@@ -61,6 +59,7 @@ Read `mattermost-send` when the user explicitly asks to send, share, post, or pu
 Read a skill under `k-skills` when the request is about Korean public data, Korean local information, Korean services, or Korean text utilities.
 
 - `korea-weather`: Korean weather forecast by location or coordinates.
+- `srt-booking`: SRT train availability, reservation inspection, booking, cancellation, and sold-out retry guidance through SRTrain.
 - `fine-dust-location`: Korean fine dust and air quality by region.
 - `han-river-water-level`: Han River water level by station.
 - `seoul-subway-arrival`: Seoul subway real-time arrival information.

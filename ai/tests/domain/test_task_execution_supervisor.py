@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.time import utc_now
+from app.domain.orchestration.agent.loop import TaskEngine
 from app.domain.orchestration.contracts import OrchestrationRequest
 from app.domain.orchestration.task_execution_supervisor import TaskExecutionSupervisor, TaskExecutionSupervisorConfig
 from app.domain.tasks.models import TaskRun
@@ -84,6 +85,66 @@ async def test_task_execution_supervisor_claims_and_executes_queued_task():
 
 async def _record_completion(target: list[str], task_run_id: str) -> None:
     target.append(task_run_id)
+
+
+@pytest.mark.asyncio
+async def test_task_engine_run_claimed_rejects_unclaimed_direct_task():
+    repository = InMemoryTaskRepository()
+    task = repository.create_direct_task(
+        TaskRun(
+            task_run_id="task-direct-ownership",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session-1",
+            status="PENDING",
+        )
+    )
+    engine = TaskEngine(
+        repository=repository,
+        broadcaster=None,
+        approval_service=None,
+        child_session_launcher=None,
+        planner=None,
+        tool_registry=None,
+    )
+
+    with pytest.raises(RuntimeError, match="not claimed"):
+        await engine.run_claimed(task=task, handler=object())
+
+
+@pytest.mark.asyncio
+async def test_task_engine_run_claimed_allows_supervisor_claimed_task(monkeypatch):
+    repository = InMemoryTaskRepository()
+    repository.create_pending_task(
+        TaskRun(
+            task_run_id="task-claimed-ownership",
+            task_type="agent.loop",
+            owner_key="42",
+            session_key="session-1",
+            status="PENDING",
+        )
+    )
+    task = repository.claim_next_task(claim_owner="worker-a", lease_seconds=30)
+    assert task is not None
+    engine = TaskEngine(
+        repository=repository,
+        broadcaster=None,
+        approval_service=None,
+        child_session_launcher=None,
+        planner=None,
+        tool_registry=None,
+    )
+
+    async def fake_execute_initial(*, task, handler, resume_payload):
+        task.result_payload = {"ok": True}
+        return task
+
+    monkeypatch.setattr(engine, "_execute_initial", fake_execute_initial)
+
+    result = await engine.run_claimed(task=task, handler=object())
+
+    assert result.task_run_id == "task-claimed-ownership"
+    assert result.result_payload == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -170,6 +231,7 @@ async def test_task_execution_supervisor_recovers_stale_running_tasks_before_cla
             session_key="session-1",
             status="RUNNING",
             queue_status="running",
+            claim_owner="worker-a",
             updated_at=utc_now() - timedelta(minutes=20),
         )
     )

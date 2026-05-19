@@ -9,7 +9,7 @@ def test_build_conversation_history_keeps_user_assistant_turns_only():
     rows = [
         {"id": 1, "role": "user", "content": "강남역에서 지갑 잃어버렸어", "metadata": {}},
         {"id": 2, "role": "assistant", "content": "공식 조회 경로를 확인했습니다.", "metadata": {}},
-        {"id": 3, "role": "tool", "content": "internal", "metadata": {"tool_name": "web_search"}},
+        {"id": 3, "role": "tool", "content": "internal", "metadata": {"tool_name": "http_get"}},
         {"id": 4, "role": "user", "content": "ㄴㄴ 분실물 찾은 거", "metadata": {}},
     ]
 
@@ -53,7 +53,7 @@ def test_build_conversation_history_truncates_long_content():
     ]
 
 
-def test_compaction_preserves_head_tail_latest_user_and_uses_synthetic_summary():
+def test_compaction_keeps_tail_latest_user_and_uses_synthetic_summary():
     history = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"메시지 {i}"}
         for i in range(40)
@@ -61,18 +61,35 @@ def test_compaction_preserves_head_tail_latest_user_and_uses_synthetic_summary()
 
     compacted = compact_conversation_history(
         history,
-        protect_head_n=2,
         protect_tail_n=8,
         max_messages=16,
     )
 
-    assert compacted[0]["content"] == "메시지 0"
-    assert compacted[1]["content"] == "메시지 1"
-    assert compacted[2]["role"] == "assistant"
-    assert "이전 대화 요약" in compacted[2]["content"]
+    assert compacted[0]["role"] == "assistant"
+    assert "이전 대화 요약" in compacted[0]["content"]
+    assert "메시지 0" not in [item["content"] for item in compacted]
     assert compacted[-1]["content"] == "메시지 39"
     assert len(compacted) <= 16
     assert all(item["role"] != "system" for item in compacted)
+
+
+def test_compaction_default_does_not_pin_oldest_head_request():
+    history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"메시지 {i}"}
+        for i in range(40)
+    ]
+
+    compacted = compact_conversation_history(
+        history,
+        protect_tail_n=8,
+        max_messages=12,
+    )
+
+    assert compacted[0]["role"] == "assistant"
+    assert "이전 대화 요약" in compacted[0]["content"]
+    assert "메시지 0" not in [item["content"] for item in compacted]
+    assert compacted[-1]["content"] == "메시지 39"
+    assert len(compacted) <= 12
 
 
 def test_compaction_does_not_mutate_original_or_compact_when_not_helpful():

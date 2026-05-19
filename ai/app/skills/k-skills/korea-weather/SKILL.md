@@ -48,7 +48,7 @@ metadata:
 
 ### 2. Query the short-term forecast endpoint
 
-`http_get` runtime tool 이 있으면 먼저 사용한다. `terminal.run`/`curl`은 `http_get`이 없을 때만 fallback으로 사용한다. `web_search`로 일반 검색하지 않는다.
+`http_get` runtime tool 이 있으면 먼저 사용한다. `terminal.run`/`curl`은 `http_get`이 없을 때만 fallback으로 사용한다. 날씨 요청은 일반 검색이 아니라 공식 API/프록시 조회로 처리한다.
 
 예시 tool call:
 

@@ -25,7 +25,7 @@ import java.util.Optional;
 class DisplayEventPublishServiceTest {
 
     private static final Long USER_ID = 1L;
-    private static final String DEVICE_ID = "deskmate-c3-a1b2c3";
+    private static final String DEVICE_ID = "heygent-c3-a1b2c3";
     private static final String SESSION_ID = "session_test_001";
     private static final String STEP_RUN_ID = "step_test_001";
 
@@ -93,7 +93,7 @@ class DisplayEventPublishServiceTest {
     void publishSendsPayloadToActiveDevice() {
         DisplayEventPayload payload = payload();
         DisplayPublishResult expected = DisplayPublishResult.published(
-            "devices/deskmate-c3-a1b2c3/display",
+            "devices/heygent-c3-a1b2c3/display",
             0,
             payload
         );
@@ -111,7 +111,7 @@ class DisplayEventPublishServiceTest {
         DisplayEventPayload payload = payload();
         DisplayPublishResult expected = DisplayPublishResult.skipped(
             "MQTT publish failed",
-            "devices/deskmate-c3-a1b2c3/display",
+            "devices/heygent-c3-a1b2c3/display",
             0,
             payload
         );

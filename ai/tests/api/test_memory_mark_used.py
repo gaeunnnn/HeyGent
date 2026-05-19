@@ -23,6 +23,11 @@ class FakeUsageAttributionVerifier:
         self.scores = scores or {}
         self.fail = fail
         self.calls = []
+        self.last_memory_provider_meta = {
+            "provider_name": "fake_memory_provider",
+            "selected_model": "gpt-memory-debug",
+            "max_attempts": 3,
+        }
 
     async def verify_usage(self, **kwargs):
         self.calls.append(kwargs)
@@ -35,6 +40,7 @@ class FakeUsageAttributionVerifier:
             failed=False,
             fallback_reason=None,
             latency_ms=1,
+            error_details=None,
         )
 
 
@@ -153,7 +159,12 @@ async def test_mark_used_recalled_memories_uses_llm_attribution_when_semantic_ma
             backend_memory_client=memory_client,
             memory_usage_attribution_verifier=verifier,
         ),
-        task_input=_task_input(memory_ids=[11]),
+        task_input={
+            **_task_input(memory_ids=[11]),
+            "model": "gpt-current",
+            "provider_name": "openai_api_key",
+            "session_id": "session_1",
+        },
         user_id="7",
         assistant_message="해당 흐름을 이어서 반영했습니다.",
         task_run_id="task_1",
@@ -168,6 +179,13 @@ async def test_mark_used_recalled_memories_uses_llm_attribution_when_semantic_ma
         }
     ]
     assert verifier.calls
+    assert verifier.calls[0]["runtime_context"] == {
+        "user_id": "7",
+        "provider_name": "openai_api_key",
+        "task_run_id": "task_1",
+        "session_id": "session_1",
+        "model": "gpt-current",
+    }
     assert observation["status"] == "completed"
     assert observation["reason"] == "llm_attribution_verifier"
     assert observation["used_memory_ids"] == [11]

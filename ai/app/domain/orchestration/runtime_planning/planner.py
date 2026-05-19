@@ -46,31 +46,25 @@ class Planner:
             todo_state=build_task_todo_payload(initial_todo_state),
         )
 
-    def materialize_observed_semantic_step(
+    def materialize_runtime_step(
         self,
         *,
         task: TaskRun,
         handler: TaskHandler,
         input_payload: dict,
-        step_order: int,
-        observed_step: dict,
-        outcome: dict,
-        include_outcome_detail: bool,
+        step_order: int = 1,
     ) -> StepRun:
-        """모델이 선언한 의미 단계 하나를 StepRun으로 만든다.
+        """provider 호출 전에 서버가 만드는 실제 실행 anchor다.
 
-        todo는 단계 내부 체크리스트이고, 이 메서드는 `step` planning tool로 모델이 직접
-        선언한 큰 의미 단계에만 사용한다.
+        이전 구조에서는 모델이 `step` 도구를 호출해야 StepRun이 생겼다. 그러면 도구 호출 전까지
+        화면에 묶을 실행 기준점이 없고, 모델이 단계 선언을 반복하면 StepRun도 함께 불어났다.
+        이 메서드는 그런 선언용 도구와 무관하게 TaskRun마다 서버가 먼저 하나의 StepRun을 열어
+        이후 LLM 응답, tool call, 하위 에이전트 실행을 같은 실행 anchor에 누적하게 한다.
         """
 
-        title = str(observed_step.get("title") or observed_step.get("summary") or handler.spec.step_title)
-        summary = str(observed_step.get("summary") or title)
-        goal = str(observed_step.get("goal") or summary or title)
-        step_key = str(observed_step.get("id") or step_order).strip() or str(step_order)
-        semantic_key = f"observed.{step_key}"
-        detail_json = build_default_step_detail()
-        if include_outcome_detail:
-            detail_json = merge_step_detail(detail_json, outcome.get("detail_json"))
+        title = str(handler.spec.step_title or task.title or handler.spec.task_title or "에이전트 실행").strip()
+        goal = str(handler.spec.semantic_goal or title).strip()
+        semantic_key = self._handler_semantic_key(handler, fallback=handler.spec.step_type)
         step = StepRun(
             step_run_id=new_id("step"),
             task_run_id=task.task_run_id,
@@ -78,15 +72,9 @@ class Planner:
             step_type=handler.spec.step_type,
             status=StepStatus.PENDING,
             title=title,
-            input_payload={
-                **dict(input_payload or {}),
-                "observed_step_key": step_key,
-                "observed_step_title": title,
-                "observed_step_summary": summary,
-                "observed_step_goal": goal,
-            },
-            detail_json=detail_json,
-            summary_message=summary,
+            input_payload=dict(input_payload or {}),
+            detail_json=build_default_step_detail(),
+            summary_message=f"{title} 중",
         )
         step.detail_json = merge_step_detail(
             step.detail_json,

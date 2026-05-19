@@ -41,7 +41,7 @@ type AgentChoice = {
   templateKey?: string
 }
 
-const CEO_PROFILE_IMAGE = '/assets/agents/ceo/ceo_profile.png'
+const CEO_PROFILE_IMAGE = '/assets/agents/ceo/ceo_profile_img.png'
 
 type FlowNodeData = Record<string, unknown> & {
   assigneeImageUrl?: string
@@ -1168,19 +1168,19 @@ function EdgeDeleteSheet({
         <div className="grid grid-cols-2 gap-2 border-t border-white/10 p-3">
           <button
             type="button"
-            onClick={onCancel}
-            disabled={busy}
-            className="rounded-xl px-3 py-2 text-sm font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-40"
-          >
-            취소
-          </button>
-          <button
-            type="button"
             onClick={onConfirm}
             disabled={busy}
             className="rounded-xl bg-red-500 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-60"
           >
             삭제
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-xl px-3 py-2 text-sm font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-40"
+          >
+            취소
           </button>
         </div>
       </div>
@@ -1324,9 +1324,6 @@ function WorkComposer({
         </div>
 
         <div className="flex justify-end gap-2 border-t border-white/10 px-5 py-3">
-          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
-            취소
-          </Button>
           <Button
             type="button"
             size="sm"
@@ -1334,6 +1331,9 @@ function WorkComposer({
             disabled={!agent || !title.trim() || agentBusy}
           >
             추가
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+            취소
           </Button>
         </div>
       </div>

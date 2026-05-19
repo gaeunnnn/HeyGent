@@ -85,6 +85,31 @@ class BackendAiClient:
         )
         return credential
 
+    def invalidate_credential_cache(
+        self,
+        *,
+        user_id: str | int,
+        provider_name: str,
+        model: str | None = None,
+    ) -> int:
+        normalized_user_id = self._required_user_id(user_id)
+        normalized_provider = self._required_text(provider_name, "providerName")
+        normalized_model = self._optional_text(model)
+
+        removed = 0
+        for cache_key in list(self._credential_cache):
+            cache_user_id, cache_provider, cache_model = cache_key
+            if cache_user_id != normalized_user_id or cache_provider != normalized_provider:
+                continue
+            if normalized_model is not None and cache_model != normalized_model:
+                continue
+            # credential cache는 실제 API key를 담고 있으므로 provider key 저장/삭제 직후에는
+            # TTL이 남아 있어도 반드시 버린다. 그렇지 않으면 DB는 새 키인데 모델 호출은
+            # 이전 키로 나가는 시간이 생겨 429/권한 오류가 계속 재현될 수 있다.
+            self._credential_cache.pop(cache_key, None)
+            removed += 1
+        return removed
+
     async def record_command_usage(
         self,
         *,

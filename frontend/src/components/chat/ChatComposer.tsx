@@ -1,50 +1,57 @@
 import {
-  AudioLines,
   BarChart2,
-  ChevronRight,
   FileImage,
-  Globe,
-  ImagePlus,
+  ImageIcon,
   ListTodo,
   Loader2,
   Mic,
-  MoreHorizontal,
+  Paperclip,
   Plus,
-  Search,
   Send,
   Square,
   X,
 } from 'lucide-react'
-import { useLayoutEffect, useRef, useState, useCallback, type KeyboardEvent } from 'react'
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+} from 'react'
+import { getCommandUsage, type CommandUsageSummary } from '@/apis/aiCommandUsage'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { VoiceWaveform } from './VoiceWaveform'
-import { getCommandUsage, type CommandUsageSummary } from '@/apis/aiCommandUsage'
+
+export type ChatAttachmentPayload = {
+  id: string
+  name: string
+  type: string
+  size: number
+  lastModified: number
+  isImage: boolean
+  dataUrl?: string
+  text?: string
+  textTruncated?: boolean
+  error?: string
+}
 
 type ChatComposerProps = {
   disabled?: boolean
   isSending?: boolean
   placeholder?: string
-  onSend: (content: string) => void
+  onSend: (content: string, attachments?: ChatAttachmentPayload[]) => void | Promise<void>
   onClearSelectedWork?: () => void
   onSelectWorkClick?: () => void
   onStop?: () => void
-  onVoiceMode?: () => void
   draftValue?: string | null
   statusMessage?: string | null
   selectedWorkLabel?: string | null
   sessionId?: string
 }
 
-const attachMenuItems = [
-  { icon: FileImage, label: '사진 및 파일 추가', hasArrow: false },
-  { icon: FileImage, label: '최근 파일', hasArrow: true },
-  null,
-  { icon: ImagePlus, label: '이미지 만들기', hasArrow: false },
-  { icon: Search, label: '심층 리서치', hasArrow: false },
-  { icon: Globe, label: '웹 검색', hasArrow: false },
-  null,
-  { icon: MoreHorizontal, label: '더 보기', hasArrow: true },
-]
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+const MAX_TEXT_CHARS = 12_000
 
 export function ChatComposer({
   disabled = false,
@@ -54,7 +61,6 @@ export function ChatComposer({
   onClearSelectedWork,
   onSelectWorkClick,
   onStop,
-  onVoiceMode,
   draftValue = null,
   statusMessage = null,
   selectedWorkLabel = null,
@@ -67,7 +73,18 @@ export function ChatComposer({
   const [usageSummary, setUsageSummary] = useState<CommandUsageSummary | null>(null)
   const [usageLoading, setUsageLoading] = useState(false)
   const [usageError, setUsageError] = useState<string | null>(null)
+  const [attachments, setAttachments] = useState<File[]>([])
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [isPreparingAttachments, setIsPreparingAttachments] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const dragDepthRef = useRef(0)
+
+  const appendAttachments = useCallback((files: FileList | File[]) => {
+    const next = Array.from(files)
+    if (next.length === 0) return
+    setAttachments((prev) => [...prev, ...next])
+  }, [])
 
   const fetchSessionUsage = useCallback(async () => {
     if (!sessionId) return
@@ -83,11 +100,6 @@ export function ChatComposer({
     }
   }, [sessionId])
 
-  const handleUsageOpen = (open: boolean) => {
-    setUsageOpen(open)
-    if (open && !usageSummary && !usageLoading) void fetchSessionUsage()
-  }
-
   useLayoutEffect(() => {
     const textarea = textareaRef.current
     if (textarea === null) return
@@ -96,25 +108,128 @@ export function ChatComposer({
     textarea.style.height = `${Math.min(textarea.scrollHeight, 144)}px`
   }, [value])
 
-  const submit = () => {
+  const openFilePicker = () => {
+    if (disabled || isSending || isPreparingAttachments) return
+    fileInputRef.current?.click()
+  }
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const handleUsageOpen = (open: boolean) => {
+    setUsageOpen(open)
+    if (open && !usageSummary && !usageLoading) void fetchSessionUsage()
+  }
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepthRef.current += 1
+    setIsDragOver(true)
+  }
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) setIsDragOver(false)
+  }
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepthRef.current = 0
+    setIsDragOver(false)
+    if (event.dataTransfer.files.length > 0) appendAttachments(event.dataTransfer.files)
+  }
+
+  const submit = async () => {
     const trimmed = value.trim()
-    if (!trimmed || disabled || isSending) return
-    onSend(trimmed)
-    setValue('')
+    if ((!trimmed && attachments.length === 0) || disabled || isSending || isPreparingAttachments) {
+      return
+    }
+
+    setIsPreparingAttachments(true)
+    try {
+      const attachmentPayloads = await Promise.all(attachments.map(readAttachmentPayload))
+      await onSend(trimmed || '첨부 파일을 확인해 주세요.', attachmentPayloads)
+      setValue('')
+      setAttachments([])
+    } finally {
+      setIsPreparingAttachments(false)
+    }
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      submit()
+      void submit()
     }
   }
+
+  const canSend = value.trim() !== '' || attachments.length > 0
 
   return (
     <div className="bg-background px-4 pt-2 pb-8 sm:pb-10">
       <div className="mx-auto max-w-3xl">
-        <div className="border-border bg-card overflow-hidden rounded-2xl border shadow-sm transition-shadow duration-200 hover:shadow-md">
-          {/* Input row */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => {
+            if (event.target.files) appendAttachments(event.target.files)
+            event.target.value = ''
+          }}
+        />
+        <div
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`border-border bg-card relative overflow-hidden rounded-2xl border shadow-sm transition-shadow duration-200 hover:shadow-md ${
+            isDragOver ? 'ring-primary/60 ring-2' : ''
+          }`}
+        >
+          {isDragOver && (
+            <div className="bg-primary/10 text-primary pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm font-medium">
+              사진과 파일을 여기에 놓아 첨부
+            </div>
+          )}
+          {attachments.length > 0 && (
+            <div className="border-border/60 flex flex-wrap gap-2 border-b px-5 py-2">
+              {attachments.map((file, index) => (
+                <span
+                  key={`${file.name}-${file.lastModified}-${index}`}
+                  className="bg-muted/40 text-foreground inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-xs"
+                >
+                  {file.type.startsWith('image/') ? (
+                    <ImageIcon className="text-muted-foreground h-3 w-3 shrink-0" />
+                  ) : (
+                    <Paperclip className="text-muted-foreground h-3 w-3 shrink-0" />
+                  )}
+                  <span className="max-w-[16ch] truncate" title={file.name}>
+                    {file.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(index)}
+                    aria-label={`${file.name} 첨부 제거`}
+                    className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           {selectedWorkLabel && (
             <div className="border-border/60 bg-muted/20 flex items-center gap-2 border-b px-5 py-2 text-xs">
               <ListTodo className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
@@ -122,16 +237,14 @@ export function ChatComposer({
               <span className="text-foreground min-w-0 flex-1 truncate font-medium">
                 {selectedWorkLabel}
               </span>
-              {selectedWorkLabel && (
-                <button
-                  type="button"
-                  onClick={onClearSelectedWork}
-                  aria-label="연결된 작업 해제"
-                  className="text-muted-foreground hover:text-foreground rounded-sm p-1"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={onClearSelectedWork}
+                aria-label="연결된 작업 해제"
+                className="text-muted-foreground hover:text-foreground rounded-sm p-1"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
           )}
           <div className="flex items-center gap-3 px-5 py-2">
@@ -139,8 +252,9 @@ export function ChatComposer({
               <PopoverTrigger asChild>
                 <button
                   type="button"
-                  aria-label="파일 또는 이미지 추가"
-                  className="bg-muted text-muted-foreground hover:bg-muted/80 shrink-0 rounded-full p-1 transition-colors"
+                  aria-label="사진 또는 파일 추가"
+                  className="bg-muted text-muted-foreground hover:bg-muted/80 shrink-0 rounded-full p-1 transition-colors disabled:opacity-40"
+                  disabled={disabled || isSending || isPreparingAttachments}
                 >
                   <Plus className="h-4 w-4" />
                 </button>
@@ -151,39 +265,35 @@ export function ChatComposer({
                 sideOffset={8}
                 className="w-52 rounded-2xl p-1.5"
               >
-                {attachMenuItems.map((item, i) =>
-                  item === null ? (
-                    <div key={i} className="border-border/60 my-1 border-t" />
-                  ) : (
-                    <button
-                      key={item.label}
-                      type="button"
-                      onClick={() => setAttachOpen(false)}
-                      className="hover:bg-muted flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors"
-                    >
-                      <item.icon className="text-muted-foreground h-4 w-4 shrink-0" />
-                      <span className="text-foreground flex-1 text-sm">{item.label}</span>
-                      {item.hasArrow && (
-                        <ChevronRight className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
-                      )}
-                    </button>
-                  ),
-                )}
-                <div className="border-border/60 my-1 border-t" />
                 <button
                   type="button"
                   onClick={() => {
                     setAttachOpen(false)
-                    onSelectWorkClick?.()
+                    openFilePicker()
                   }}
                   className="hover:bg-muted flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors"
                 >
-                  <ListTodo className="text-muted-foreground h-4 w-4 shrink-0" />
-                  <span className="text-foreground flex-1 text-sm">기존 작업 선택</span>
+                  <FileImage className="text-muted-foreground h-4 w-4 shrink-0" />
+                  <span className="text-foreground flex-1 text-sm">PC에서 파일 선택</span>
                 </button>
+                {onSelectWorkClick && (
+                  <>
+                    <div className="border-border/60 my-1 border-t" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAttachOpen(false)
+                        onSelectWorkClick()
+                      }}
+                      className="hover:bg-muted flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors"
+                    >
+                      <ListTodo className="text-muted-foreground h-4 w-4 shrink-0" />
+                      <span className="text-foreground flex-1 text-sm">기존 작업 선택</span>
+                    </button>
+                  </>
+                )}
               </PopoverContent>
             </Popover>
-            {/* 토큰 사용량 버튼 — 세션 ID가 있을 때만 표시 */}
             {sessionId && (
               <Popover open={usageOpen} onOpenChange={handleUsageOpen}>
                 <PopoverTrigger asChild>
@@ -202,7 +312,7 @@ export function ChatComposer({
                   className="w-64 rounded-2xl p-4"
                 >
                   <div className="mb-3 flex items-center justify-between">
-                    <p className="text-foreground text-sm font-semibold">이 세션 토큰 사용량</p>
+                    <p className="text-foreground text-sm font-semibold">세션 토큰 사용량</p>
                     <button
                       type="button"
                       onClick={() => void fetchSessionUsage()}
@@ -231,11 +341,11 @@ export function ChatComposer({
                           label: '예상 비용',
                           value: `$${usageSummary.estimatedCostUsd.toFixed(4)}`,
                         },
-                      ].map(({ label, value: val }) => (
+                      ].map(({ label, value: usageValue }) => (
                         <div key={label} className="flex items-center justify-between">
                           <span className="text-muted-foreground text-xs">{label}</span>
                           <span className="text-foreground text-xs font-semibold tabular-nums">
-                            {val}
+                            {usageValue}
                           </span>
                         </div>
                       ))}
@@ -263,7 +373,7 @@ export function ChatComposer({
             )}
             <button
               type="button"
-              onClick={() => setIsRecording((r) => !r)}
+              onClick={() => setIsRecording((recording) => !recording)}
               aria-label={isRecording ? '음성 입력 중지' : '음성 입력 시작'}
               aria-pressed={isRecording}
               className={`shrink-0 rounded-2xl p-2.5 transition-colors ${
@@ -284,27 +394,21 @@ export function ChatComposer({
               >
                 <Square className="h-4 w-4 fill-current" />
               </button>
-            ) : value.trim() ? (
+            ) : canSend ? (
               <button
                 type="button"
-                onClick={submit}
-                disabled={disabled}
+                onClick={() => void submit()}
+                disabled={disabled || isPreparingAttachments}
                 aria-label="메시지 보내기"
                 className="bg-foreground text-background hover:bg-foreground/85 shrink-0 rounded-2xl p-2.5 transition-colors disabled:opacity-40"
               >
-                <Send className="h-4 w-4" />
+                {isPreparingAttachments ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
               </button>
-            ) : (
-              <button
-                type="button"
-                onClick={onVoiceMode}
-                aria-label="음성 대화 모드"
-                title="음성 대화 모드"
-                className="bg-foreground text-background hover:bg-foreground/85 shrink-0 rounded-2xl p-2.5 transition-colors"
-              >
-                <AudioLines className="h-4 w-4" />
-              </button>
-            )}
+            ) : null}
           </div>
           {statusMessage && (
             <p className="text-muted-foreground border-border/60 border-t px-5 py-2 text-xs">
@@ -315,4 +419,61 @@ export function ChatComposer({
       </div>
     </div>
   )
+}
+
+async function readAttachmentPayload(file: File): Promise<ChatAttachmentPayload> {
+  const base = {
+    id: `${file.name}-${file.lastModified}-${file.size}`,
+    name: file.name,
+    type: file.type || 'application/octet-stream',
+    size: file.size,
+    lastModified: file.lastModified,
+    isImage: file.type.startsWith('image/'),
+  }
+
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    return {
+      ...base,
+      error: `File is larger than ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB.`,
+    }
+  }
+
+  const [dataUrl, text] = await Promise.all([
+    readFileAsDataUrl(file),
+    shouldReadAsText(file) ? readFileAsText(file) : Promise.resolve(undefined),
+  ])
+
+  return {
+    ...base,
+    dataUrl,
+    ...(text === undefined
+      ? {}
+      : {
+          text: text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) : text,
+          textTruncated: text.length > MAX_TEXT_CHARS,
+        }),
+  }
+}
+
+function shouldReadAsText(file: File) {
+  if (file.type.startsWith('text/')) return true
+  return /\.(csv|json|log|md|txt|xml|yaml|yml)$/i.test(file.name)
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read attachment.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function readFileAsText(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read attachment text.'))
+    reader.readAsText(file)
+  })
 }

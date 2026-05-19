@@ -53,11 +53,11 @@ import { saveOpenAiApiKey, deleteOpenAiApiKey, type ProviderName } from '@/apis/
 import { getOpenAiProviders } from '@/apis/openaiProviders'
 import {
   getUserSkillDetail,
-  listUserSkills,
   updateUserSkillSetting,
   type SkillCatalogDetail,
   type SkillCatalogItem,
 } from '@/apis/agents'
+import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import {
   createMattermostChannel,
   deleteMattermostChannel,
@@ -303,7 +303,9 @@ function SkillsContent() {
 
   useEffect(() => {
     let alive = true
-    void listUserSkills()
+    void useAgentCacheStore
+      .getState()
+      .fetchUserSkills()
       .then((items) => {
         if (!alive) return
         setSkills(items)
@@ -394,11 +396,15 @@ function SkillsContent() {
         ...current,
         ...Object.fromEntries(savedItems.map((item) => [item.skillId, item.enabled])),
       }))
+      // 스킬 활성 상태가 바뀌었으므로 캐시 무효화 — 다음 패널 진입에서 다시 받는다.
+      useAgentCacheStore.getState().invalidateUserSkills()
       setError(null)
     } catch {
       setError('스킬 설정을 저장하지 못했습니다.')
       try {
-        const latest = await listUserSkills()
+        // 저장 실패로 서버 상태가 의도와 어긋났을 수 있어 캐시 무효화 후 최신본을 다시 받는다.
+        useAgentCacheStore.getState().invalidateUserSkills()
+        const latest = await useAgentCacheStore.getState().fetchUserSkills()
         setSkills(latest)
         setDraftEnabled(Object.fromEntries(latest.map((item) => [item.skillId, item.enabled])))
       } catch {
@@ -1489,6 +1495,15 @@ function ChannelsContent({
             <span className="text-foreground text-sm">기본 채널로 지정</span>
           </label>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleSaveChannel()}
+              disabled={!canSave || saving}
+              className="bg-foreground text-background hover:bg-foreground/85 inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors disabled:opacity-40"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              {isEditing ? '수정' : '추가'}
+            </button>
             {isEditing && (
               <button
                 type="button"
@@ -1499,15 +1514,6 @@ function ChannelsContent({
                 취소
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => void handleSaveChannel()}
-              disabled={!canSave || saving}
-              className="bg-foreground text-background hover:bg-foreground/85 inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors disabled:opacity-40"
-            >
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              {isEditing ? '수정' : '추가'}
-            </button>
           </div>
         </div>
       </div>

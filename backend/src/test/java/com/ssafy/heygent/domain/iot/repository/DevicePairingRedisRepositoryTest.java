@@ -28,7 +28,7 @@ import java.util.Optional;
 class DevicePairingRedisRepositoryTest {
 
     private static final String PAIR_CODE = "482913";
-    private static final String DEVICE_ID = "deskmate-c3-a1b2c3";
+    private static final String DEVICE_ID = "heygent-c3-a1b2c3";
 
     @Mock
     private RedisTemplate<String, String> redisTemplate;
@@ -61,7 +61,7 @@ class DevicePairingRedisRepositoryTest {
 
         assertThat(keyCaptor.getAllValues()).containsExactly(
             "iot:pairing:code:482913",
-            "iot:pairing:device:deskmate-c3-a1b2c3"
+            "iot:pairing:device:heygent-c3-a1b2c3"
         );
         assertThat(ttlCaptor.getAllValues()).containsExactly(ttl, ttl);
     }
@@ -84,7 +84,7 @@ class DevicePairingRedisRepositoryTest {
 
         verify(redisTemplate).delete(List.of(
             "iot:pairing:code:482913",
-            "iot:pairing:device:deskmate-c3-a1b2c3"
+            "iot:pairing:device:heygent-c3-a1b2c3"
         ));
     }
 

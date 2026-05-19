@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +22,7 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
     ),
     "skill-runtime": RuntimeToolsetDefinition(
         description="Restricted skill execution tools.",
-        tools=("skill.execute",),
+        tools=("skill.execute", "skill.run_script"),
     ),
     "session": RuntimeToolsetDefinition(
         description="Session record and recall tools.",
@@ -26,15 +30,19 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
     ),
     "planning": RuntimeToolsetDefinition(
         description="Todo and planning tools.",
-        tools=("step", "todo"),
+        tools=("todo",),
     ),
     "terminal": RuntimeToolsetDefinition(
         description="Local terminal execution tools.",
         tools=("terminal.run",),
     ),
     "web": RuntimeToolsetDefinition(
-        description="Web research, extraction, and crawl tools.",
-        tools=("web_search", "web_extract", "web_crawl", "http_get"),
+        description="Direct HTTP fetch tools.",
+        tools=("http_get",),
+    ),
+    "tool-result": RuntimeToolsetDefinition(
+        description="Bounded access to stored raw tool results.",
+        tools=("tool_result.read",),
     ),
     "messaging": RuntimeToolsetDefinition(
         description="Outbound messaging tools.",
@@ -44,21 +52,17 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
         description="Notion workspace proxy execution tools.",
         tools=("notion.execute",),
     ),
-    "browser": RuntimeToolsetDefinition(
-        description="Browser automation tools.",
-        tools=(
-            "browser_navigate",
-            "browser_snapshot",
-            "browser_click",
-            "browser_type",
-            "browser_scroll",
-            "browser_back",
-            "browser_press",
-            "browser_get_images",
-            "browser_vision",
-            "browser_console",
-            "browser_cdp",
-        ),
+    "gmail": RuntimeToolsetDefinition(
+        description="Gmail account proxy execution tools (read updates label, fetch messages, build newsletter digests).",
+        tools=("gmail.execute",),
+    ),
+    "design": RuntimeToolsetDefinition(
+        description="DESIGN.md preset inspection tools for prototype generation.",
+        tools=("design.list_presets", "design.read_preset"),
+    ),
+    "prototype": RuntimeToolsetDefinition(
+        description="Session-scoped React prototype artifact tools.",
+        tools=("prototype.create_artifact", "prototype.get_active_artifact"),
     ),
     "file": RuntimeToolsetDefinition(
         description="Local file read, write, patch, and search tools.",
@@ -78,7 +82,7 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
     ),
     "work": RuntimeToolsetDefinition(
         description="Work board assignment tools.",
-        tools=("session_agent_task", "work_disposition"),
+        tools=("session_agent_task",),
     ),
     "local-core": RuntimeToolsetDefinition(
         description="Current minimal local runtime tool bundle.",
@@ -101,11 +105,14 @@ def resolve_runtime_tool_names(enabled_toolsets: Iterable[str] | None) -> set[st
 
     resolved: set[str] = set()
     for name in enabled_toolsets:
-        if name in {"all", "*"}:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            continue
+        if normalized_name in {"all", "*"}:
             for toolset_name in list_runtime_toolsets():
                 resolved.update(_resolve_runtime_toolset(toolset_name, seen=set()))
             continue
-        resolved.update(_resolve_runtime_toolset(str(name), seen=set()))
+        resolved.update(_resolve_runtime_toolset(normalized_name, seen=set()))
     return resolved
 
 
@@ -127,10 +134,14 @@ def get_runtime_toolset_info(name: str) -> dict[str, object] | None:
 def _resolve_runtime_toolset(name: str, *, seen: set[str]) -> set[str]:
     if name in seen:
         return set()
-    try:
-        definition = RUNTIME_TOOLSETS[name]
-    except KeyError as error:
-        raise KeyError(str(name)) from error
+    definition = RUNTIME_TOOLSETS.get(name)
+    if definition is None:
+        # DB/settings 에 남은 과거 toolset(browser 등)이나 잘못 저장된 toolset 이
+        # 한 번 들어왔다고 실행 전체를 죽이면, 모델은 실제 사용 가능한 도구도
+        # 받지 못한다. 알 수 없는 toolset 은 빈 목록으로 처리하고,
+        # 공개 설정 저장 단계에서만 allowlist 로 막는다.
+        logger.warning("Ignoring unknown runtime toolset: %s", name)
+        return set()
 
     seen.add(name)
     resolved = set(definition.tools)

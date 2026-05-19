@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
+
+
+RuntimeToolCheck = Callable[[], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +16,9 @@ class RuntimeToolDefinition:
     schema: dict[str, Any]
     enabled: bool = True
     result_format: str = "json"
+    check_fn: RuntimeToolCheck | None = None
+    requires_env: tuple[str, ...] = ()
+    unavailable_reason: str | None = None
 
 
 _REGISTERED_RUNTIME_TOOLS: dict[str, RuntimeToolDefinition] = {}
@@ -27,6 +33,9 @@ def register_runtime_tool_definition(
     schema: dict[str, Any] | None = None,
     enabled: bool = True,
     result_format: str = "json",
+    check_fn: RuntimeToolCheck | None = None,
+    requires_env: tuple[str, ...] | list[str] = (),
+    unavailable_reason: str | None = None,
 ) -> RuntimeToolDefinition:
     normalized_name = str(name).strip()
     normalized_summary = str(summary).strip()
@@ -38,6 +47,9 @@ def register_runtime_tool_definition(
         schema=_normalize_schema(name=normalized_name, summary=normalized_summary, schema=schema),
         enabled=bool(enabled),
         result_format=str(result_format or "json").strip() or "json",
+        check_fn=check_fn,
+        requires_env=tuple(str(item).strip() for item in requires_env if str(item).strip()),
+        unavailable_reason=str(unavailable_reason).strip() if unavailable_reason else None,
     )
     if not definition.name:
         raise ValueError("runtime tool definition must include name")

@@ -59,10 +59,6 @@ export function NewSessionModal({
   const [instructionsFiles, setInstructionsFiles] = useState<Record<string, string>>({})
   const [model, setModel] = useState('gpt-5.4')
   const [canDelegate, setCanDelegate] = useState(false)
-  const selectedImageIndex = Math.max(
-    0,
-    CEO_IMAGE_OPTIONS.findIndex((option) => option.src === profileImage),
-  )
 
   const handleClose = () => {
     onOpenChange(false)
@@ -257,11 +253,7 @@ export function NewSessionModal({
                     <div className="space-y-3">
                       <AgentSectionCard title="프로필">
                         <div className="grid gap-3 sm:grid-cols-[13rem_minmax(0,1fr)]">
-                          <AgentImageStepper
-                            profileImage={profileImage}
-                            selectedImageIndex={selectedImageIndex}
-                            onProfileImageChange={setProfileImage}
-                          />
+                          <AgentImageStepper profileImage={profileImage} />
                           <div className="space-y-2.5">
                             <Field label="이름">
                               <input
@@ -398,56 +390,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function AgentImageStepper({
-  onProfileImageChange,
-  profileImage,
-  selectedImageIndex,
-}: {
-  onProfileImageChange: (image: string) => void
-  profileImage: string
-  selectedImageIndex: number
-}) {
-  const selectedImage = CEO_IMAGE_OPTIONS[selectedImageIndex]
-
+function AgentImageStepper({ profileImage }: { profileImage: string }) {
   return (
     <div
-      className="flex min-h-36 w-full min-w-0 items-center justify-center gap-5 rounded-lg"
+      className="flex min-h-36 w-full min-w-0 items-center justify-center rounded-lg"
       aria-label="에이전트 이미지"
     >
-      <button
-        type="button"
-        onClick={() => {
-          const nextIndex =
-            (selectedImageIndex - 1 + CEO_IMAGE_OPTIONS.length) % CEO_IMAGE_OPTIONS.length
-          onProfileImageChange(CEO_IMAGE_OPTIONS[nextIndex].src)
-        }}
-        className="text-muted-foreground hover:bg-accent/50 hover:text-foreground flex h-10 w-10 shrink-0 items-center justify-center rounded transition-colors"
-        aria-label="이전 에이전트 이미지"
-      >
-        <ChevronLeft className="h-4 w-4" />
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          const nextIndex = (selectedImageIndex + 1) % CEO_IMAGE_OPTIONS.length
-          onProfileImageChange(CEO_IMAGE_OPTIONS[nextIndex].src)
-        }}
-        className="bg-accent hover:bg-accent/80 flex h-28 w-28 shrink-0 items-center justify-center overflow-hidden rounded-lg transition-colors"
-        aria-label={`${selectedImage?.label ?? '메인 에이전트'} 이미지 변경`}
-      >
+      <div className="bg-accent flex h-28 w-28 shrink-0 items-center justify-center overflow-hidden rounded-lg">
         <img src={profileImage} alt="" className="h-24 w-24 object-contain" draggable={false} />
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          const nextIndex = (selectedImageIndex + 1) % CEO_IMAGE_OPTIONS.length
-          onProfileImageChange(CEO_IMAGE_OPTIONS[nextIndex].src)
-        }}
-        className="text-muted-foreground hover:bg-accent/50 hover:text-foreground flex h-10 w-10 shrink-0 items-center justify-center rounded transition-colors"
-        aria-label="다음 에이전트 이미지"
-      >
-        <ChevronRight className="h-4 w-4" />
-      </button>
+      </div>
     </div>
   )
 }

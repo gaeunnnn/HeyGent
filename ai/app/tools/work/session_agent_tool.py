@@ -77,43 +77,6 @@ _SESSION_AGENT_TASK_DEFINITION = register_runtime_tool_definition(
 )
 
 
-WORK_DISPOSITION_SCHEMA = {
-    "name": "work_disposition",
-    "description": (
-        "Set the final disposition for the connected work item. "
-        "Call this before finishing any run that has a workId."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "status": {
-                "type": "string",
-                "enum": ["todo", "in_progress", "in_review", "blocked", "done", "cancelled"],
-                "description": "Final work status after this run. Use blocked only when required input, permission, tools, or prerequisite work prevents progress.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "Short reason or result summary for the status.",
-            },
-            "nextAction": {
-                "type": "string",
-                "description": "Next action needed when the work is not done.",
-            },
-        },
-        "required": ["status", "summary"],
-    },
-}
-
-_WORK_DISPOSITION_DEFINITION = register_runtime_tool_definition(
-    name="work_disposition",
-    toolset="work",
-    module="app.tools.work.session_agent_tool",
-    summary="Set the final status disposition for the connected work item.",
-    schema=WORK_DISPOSITION_SCHEMA,
-    result_format="json",
-)
-
-
 def session_agent_tool_definition() -> dict[str, object]:
     return {
         "name": _SESSION_AGENT_TASK_DEFINITION.name,
@@ -122,15 +85,4 @@ def session_agent_tool_definition() -> dict[str, object]:
         "summary": _SESSION_AGENT_TASK_DEFINITION.summary,
         "schema": _SESSION_AGENT_TASK_DEFINITION.schema,
         "result_format": _SESSION_AGENT_TASK_DEFINITION.result_format,
-    }
-
-
-def work_disposition_tool_definition() -> dict[str, object]:
-    return {
-        "name": _WORK_DISPOSITION_DEFINITION.name,
-        "toolset": _WORK_DISPOSITION_DEFINITION.toolset,
-        "module": _WORK_DISPOSITION_DEFINITION.module,
-        "summary": _WORK_DISPOSITION_DEFINITION.summary,
-        "schema": _WORK_DISPOSITION_DEFINITION.schema,
-        "result_format": _WORK_DISPOSITION_DEFINITION.result_format,
     }

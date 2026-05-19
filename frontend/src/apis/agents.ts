@@ -43,6 +43,7 @@ export type AgentProfile = {
   adapterType?: string | null
   model?: string | null
   profileImage?: string | null
+  visualKey?: string | null
   skills: string[]
   instructionBundleId?: string | null
   entryDocumentKey?: string | null
@@ -234,23 +235,35 @@ export function agentProfileToAgent(profile: AgentProfile): Agent {
     model: profile.model ?? undefined,
     extraArgs: '',
     profileImage: profile.profileImage ?? undefined,
-    spriteId: deriveSpriteId(profile.profileImage),
+    spriteId: profile.visualKey ?? deriveSpriteId(profile.profileImage),
     reportsToAgentId: 'main',
     skills: profile.skills,
   }
 }
 
-// /assets/agents/agentXX/idle_front.png 형식의 profileImage에서 spriteId(agentXX)를 추출한다.
+// /assets/agents/agentXX/idle_front.png 또는 레거시 /assets/agents/sub/agentXX.png 형식에서 spriteId(agentXX)를 추출한다.
 export function deriveSpriteId(profileImage: string | null | undefined): string | undefined {
   if (!profileImage) return undefined
-  const match = profileImage.match(/\/assets\/agents\/(agent\d{2})\/idle_front\.png/)
-  return match?.[1]
+  const newMatch = profileImage.match(/\/assets\/agents\/(agent\d{2})\/idle_front\.png/)
+  if (newMatch) return newMatch[1]
+  const legacyMatch = profileImage.match(/\/assets\/agents\/sub\/(agent\d{2})\.png/)
+  return legacyMatch?.[1]
 }
 
 function normalizeAgentAdapterType(value: string | null | undefined) {
-  return value === 'openai' || value === undefined || value === null
-    ? (value ?? undefined)
-    : 'openai'
+  if (value === undefined || value === null || value === '') {
+    return undefined
+  }
+  if (value === 'openai') {
+    return 'openai_api_key'
+  }
+  if (value === 'gemini') {
+    return 'gemini_api_key'
+  }
+  if (value === 'openai_api_key' || value === 'gemini_api_key') {
+    return value
+  }
+  return 'openai_api_key'
 }
 
 function getInstructionsFiles(configSnapshot: Record<string, unknown>): Record<string, string> {

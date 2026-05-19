@@ -20,10 +20,11 @@ dependencies = [
   "openai>=2.0,<3",
   "pyyaml>=6.0,<7",
   "requests>=2.32,<3",
-  "firecrawl-py>=4.0,<5",
   "exa-py>=2.9,<3",
   "parallel-web>=0.4,<1",
   "firebase-admin>=6.5,<7",
+  "cryptography>=42,<46",
+  "SRTrain>=2.6.7,<3",
 ]
 
 [project.optional-dependencies]

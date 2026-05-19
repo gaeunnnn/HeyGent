@@ -34,7 +34,8 @@ interface OfficeMapProps {
   obstacleLineMode?: boolean
   obstacleLines?: Rect[]
   onNewLine?: (line: Rect) => void
-  onAgentClick?: (agentId: string) => void
+  onAgentClick?: (agentId: string, event: { clientX: number; clientY: number }) => void
+  onEmptyClick?: () => void
   agentInfoMap?: Record<string, AgentVisualizationInfo>
   selectedAgentId?: string | null
   spawningIds?: ReadonlySet<string>
@@ -54,6 +55,7 @@ export function OfficeMap({
   obstacleLines,
   onNewLine,
   onAgentClick,
+  onEmptyClick,
   agentInfoMap,
   selectedAgentId,
   spawningIds,
@@ -86,8 +88,6 @@ export function OfficeMap({
     const timer = scheduleNext()
     return () => clearTimeout(timer)
   }, [])
-  const [debugCoord, setDebugCoord] = useState<{ x: number; y: number } | null>(null)
-
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -131,8 +131,7 @@ export function OfficeMap({
       return
     }
 
-    console.log(`맵 좌표: { x: ${pos.x}, y: ${pos.y} }`)
-    setDebugCoord(pos)
+    onEmptyClick?.()
   }
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -318,26 +317,6 @@ export function OfficeMap({
           </svg>
         )}
       </div>
-
-      {/* 클릭 좌표 디버그 오버레이 (일반 모드) */}
-      {!obstacleMode && debugCoord && (
-        <div className="absolute top-4 left-1/2 z-30 -translate-x-1/2">
-          <div className="flex items-center gap-3 rounded-xl border border-white/20 bg-black/70 px-4 py-2 shadow-xl backdrop-blur-md">
-            <span className="font-mono text-sm text-yellow-300">
-              x: {debugCoord.x}, y: {debugCoord.y}
-            </span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                setDebugCoord(null)
-              }}
-              className="text-xs text-white/50 hover:text-white"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

@@ -191,6 +191,20 @@ class PostgresTaskRepository(PostgresDurableRepository):
         self._save_task_anchor(task)
         return task
 
+    def create_direct_task(self, task: TaskRun) -> TaskRun:
+        now_dt = utc_now()
+        # direct 실행은 현재 coroutine이 실행권을 가진다.
+        # DB supervisor가 집어갈 queue 항목이 아니므로 저장 순간부터 claim 대상에서 제외한다.
+        task.queue_status = "running"
+        task.claim_owner = None
+        task.claimed_at = None
+        task.lease_expires_at = None
+        task.heartbeat_at = None
+        task.next_attempt_at = None
+        task.queued_at = task.queued_at or now_dt
+        task.attempts = int(task.attempts or 0)
+        return self.create_task(task)
+
     def create_pending_task(self, task: TaskRun) -> TaskRun:
         now_dt = utc_now()
         task.status = "PENDING"
@@ -316,6 +330,7 @@ class PostgresTaskRepository(PostgresDurableRepository):
             SELECT *
             FROM run_anchors
             WHERE queue_status IN ('claimed', 'running')
+              AND claim_owner IS NOT NULL
               AND (
                 lease_expires_at < now()
                 OR heartbeat_at < now() - (%s * interval '1 second')
@@ -1002,6 +1017,8 @@ def _effective_queue_status(task: TaskRun) -> str:
     if status == "WAITING":
         return "waiting"
     if status == "RUNNING":
+        return "running"
+    if status == "PENDING" and current == "running":
         return "running"
     if status == "PENDING" and current in {"queued", "failed_retry"}:
         return current

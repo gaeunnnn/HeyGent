@@ -27,13 +27,7 @@ public class OpenAiCredentialIssueService {
         String model = runtimePolicyService.requireAllowedModel(providerName, request.getModel());
 
         if (providerName.isUserManagedApiKeyProvider()) {
-            return response(
-                providerName,
-                model,
-                "api_key",
-                openAiApiKeyService.resolveApiKey(request.getUserId(), providerName),
-                null
-            );
+            return issueApiKeyCredential(request, providerName, model);
         }
 
         if (providerName.isCodexOAuthProvider()) {
@@ -46,6 +40,20 @@ public class OpenAiCredentialIssueService {
         }
 
         throw new CustomException(ErrorCode.OPENAI_PROVIDER_NOT_SUPPORTED);
+    }
+
+    private OpenAiCredentialIssueResponse issueApiKeyCredential(
+        OpenAiCredentialIssueRequest request,
+        OpenAiProviderName providerName,
+        String model
+    ) {
+        return response(
+            providerName,
+            model,
+            "api_key",
+            openAiApiKeyService.resolveApiKey(request.getUserId(), providerName),
+            null
+        );
     }
 
     private OpenAiCredentialIssueResponse response(

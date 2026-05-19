@@ -21,7 +21,7 @@
 
 - backend에 AI 내부 인증 토큰으로 호출하는 `POST /internal/ai/notion/execute` 엔드포인트를 추가했다.
 - AI runtime에 `notion` toolset과 `notion.execute` 단일 실행 도구를 추가했다.
-- Notion skill과 40개 지원 후보 endpoint reference, 제외 endpoint, 실행 정책 문서를 추가했다.
+- Notion skill과 40개 지원 후보 endpoint 목록, 제외 endpoint, 실행 정책 문서를 추가했다.
 - 모델 입력의 `userId`는 무시하고 TaskRun owner 기반 사용자 ID만 backend 호출에 사용하게 했다.
 
 ## 주요 파일
@@ -32,7 +32,7 @@
 - `ai/app/tools/runtime/local_tool_runtime.py`
 - `ai/app/tools/runtime/toolsets.py`
 - `ai/app/skills/integrations/notion/SKILL.md`
-- `ai/app/skills/integrations/notion/references/*.md`
+- `ai/app/skills/integrations/notion/`
 
 ## 테스트 / 확인
 

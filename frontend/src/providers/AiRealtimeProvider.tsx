@@ -32,9 +32,9 @@ export function AiRealtimeProvider({ children }: AiRealtimeProviderProps) {
   const setLastError = useAiRealtimeStore((state) => state.setLastError)
   const socketRef = useRef<TaskRunSocketClient | null>(null)
   const commandClientRef = useRef<AiCommandClient | null>(null)
-  const pingIntervalRef = useRef<ReturnType<typeof window.setInterval> | null>(null)
-  const activeTaskPollIntervalRef = useRef<ReturnType<typeof window.setInterval> | null>(null)
-  const reconnectTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+  const pingIntervalRef = useRef<number | null>(null)
+  const activeTaskPollIntervalRef = useRef<number | null>(null)
+  const reconnectTimeoutRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
   const clientGenerationRef = useRef(0)
   const suppressedCloseGenerationsRef = useRef<Set<number>>(new Set())
@@ -42,6 +42,7 @@ export function AiRealtimeProvider({ children }: AiRealtimeProviderProps) {
   const activeRecoveryInFlightRef = useRef(false)
   const pendingRecoveryClientRef = useRef<TaskRunSocketClient | null>(null)
   const snapshotFetchedTaskRunsRef = useRef<Set<string>>(new Set())
+  const autoSubscribedChildTaskRunsRef = useRef<Set<string>>(new Set())
   const externalTaskSessionMapRef = useRef<Map<string, string>>(new Map())
 
   useEffect(() => {
@@ -487,6 +488,11 @@ export function AiRealtimeProvider({ children }: AiRealtimeProviderProps) {
         setLastError(error instanceof Error ? error.message : 'child TaskRun 구독에 실패했습니다.')
         return
       }
+
+      void useTaskRunStore
+        .getState()
+        .fetchSnapshot(childTaskRunId)
+        .catch(() => {})
 
       void useTaskRunStore
         .getState()

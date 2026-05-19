@@ -5,9 +5,11 @@ from fastapi import APIRouter
 from app.api.http.agents import router as agents_router
 from app.api.http.agent_sessions import router as agent_sessions_router
 from app.api.http.bridge_internal import router as bridge_internal_router
+from app.api.http.credential_cache_internal import router as credential_cache_internal_router
 from app.api.http.device_tokens import router as device_tokens_router
 from app.api.http.health import router as health_router
 from app.api.http.providers import router as providers_router
+from app.api.http.prototypes import router as prototypes_router
 from app.api.http.sessions import router as sessions_router
 from app.api.http.tasks import router as tasks_router
 from app.api.http.work import router as work_router
@@ -27,6 +29,7 @@ def build_api_router(settings: Settings) -> APIRouter:
     api_router = APIRouter(prefix=settings.api_prefix)
     api_router.include_router(health_router)
     api_router.include_router(sessions_router)
+    api_router.include_router(prototypes_router)
     api_router.include_router(device_tokens_router)
     api_router.include_router(work_router)
     api_router.include_router(workflow_templates_router)
@@ -37,4 +40,5 @@ def build_api_router(settings: Settings) -> APIRouter:
     api_router.include_router(ws_router)
     api_router.include_router(bridge_ws_router)
     api_router.include_router(bridge_internal_router)
+    api_router.include_router(credential_cache_internal_router)
     return api_router

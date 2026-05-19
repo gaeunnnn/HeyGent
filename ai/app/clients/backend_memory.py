@@ -11,6 +11,19 @@ from app.core.config import Settings, get_settings
 class BackendMemoryClientError(RuntimeError):
     """backend 장기기억 API 호출이나 응답 해석에 실패했음을 나타낸다."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        response_message: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.response_message = response_message
+
 
 @dataclass(slots=True)
 class BackendMemoryItem:
@@ -152,7 +165,13 @@ class BackendMemoryClient:
 
     def _read_data(self, response: httpx.Response) -> Any:
         if response.status_code >= 400:
-            raise BackendMemoryClientError(f"backend 장기기억 요청 실패: HTTP {response.status_code}")
+            error_code, response_message = _backend_error_details(response)
+            raise BackendMemoryClientError(
+                f"backend 장기기억 요청 실패: HTTP {response.status_code}",
+                status_code=response.status_code,
+                error_code=error_code,
+                response_message=response_message,
+            )
         try:
             payload = response.json()
         except ValueError as exc:
@@ -217,3 +236,22 @@ class BackendMemoryClient:
     def _put_if_present(self, params: dict[str, Any], key: str, value: str | None) -> None:
         if value is not None and value != "":
             params[key] = value
+
+
+def _backend_error_details(response: httpx.Response) -> tuple[str | None, str | None]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+
+    error_code = _optional_text(payload.get("code") or payload.get("errorCode"))
+    response_message = _optional_text(payload.get("message") or payload.get("error"))
+    return error_code, response_message[:500] if response_message else None
+
+
+def _optional_text(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None

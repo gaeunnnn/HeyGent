@@ -39,7 +39,7 @@ import java.time.LocalDateTime;
 class DeviceControllerTest {
 
     private static final Long USER_ID = 1L;
-    private static final String DEVICE_ID = "deskmate-c3-a1b2c3";
+    private static final String DEVICE_ID = "heygent-c3-a1b2c3";
 
     @Autowired
     private MockMvc mockMvc;

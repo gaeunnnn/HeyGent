@@ -209,6 +209,39 @@ def test_session_agent_child_input_includes_profile_skill_names():
     )
 
 
+def test_session_agent_child_input_keeps_parent_prototype_session_binding():
+    engine = _engine(
+        task_repository=InMemoryTaskRepository(),
+        work_repository=FakeWorkRepository(),
+    )
+    work = WorkItem(
+        work_id="work-design",
+        identifier="TASK-1",
+        session_id="session-ui",
+        owner_key="7",
+        owner_user_id=7,
+        title="날씨 화면 제작",
+        description="부산 날씨 화면을 만든다.",
+        status="in_progress",
+        execution_instruction="부산 날씨 화면을 React 프로토타입으로 만들어줘.",
+    )
+    engine.work_repository.create_work(work)
+
+    child_input = engine._build_session_agent_work_input(
+        parent_task=_task(
+            input_payload={
+                "model": "gpt-5.4",
+                "sessionId": "session-ui",
+                "promptMessageId": "msg-user",
+            }
+        ),
+        work=work,
+    )
+
+    assert child_input["sessionId"] == "session-ui"
+    assert child_input["promptMessageId"] == "msg-user"
+
+
 def test_session_agent_parent_update_exposes_materialized_child_task_run():
     task_repository = InMemoryTaskRepository()
     work_repository = FakeWorkRepository()
@@ -230,15 +263,13 @@ def test_session_agent_parent_update_exposes_materialized_child_task_run():
     parent_task = _task(input_payload={"prompt": "지갑 잃어버렸어", "model": "gpt-5.4"})
     parent_task.status = TaskStatus.RUNNING
     task_repository.create_task(parent_task)
-    step = engine.planner.materialize_observed_semantic_step(
+    step = engine.planner.materialize_runtime_step(
         task=parent_task,
         handler=_CompletingHandler(),
-        input_payload={},
+        input_payload=parent_task.input_payload,
         step_order=1,
-        observed_step={"id": "delegate", "title": "분실물 대응 배정", "goal": "K-에이전트에게 확인을 맡긴다"},
-        outcome={},
-        include_outcome_detail=False,
     )
+    step.title = "분실물 대응 배정"
     step.status = "RUNNING"
     task_repository.create_step(step)
     parent_task.current_step_run_id = step.step_run_id

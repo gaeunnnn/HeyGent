@@ -5,7 +5,7 @@
 ## 포함 기준
 
 - 로그인, 결제, 예약, 계정 접근 없이 조회 또는 계산할 수 있다.
-- 기존 runtime tool(`terminal.run`, `web_*`, `browser_*`, `file`)과 prompt에 주입되는 skill 설명만으로 사용할 수 있다.
+- 기존 runtime tool(`terminal.run`, `web_*`, `file`)과 prompt에 주입되는 skill 설명만으로 사용할 수 있다.
 - 외부 상태를 바꾸지 않는 읽기 전용 또는 deterministic utility다.
 - 기능 smoke test가 가능하거나, 문서 로딩 후 최소 사용 경로가 명확하다.
 

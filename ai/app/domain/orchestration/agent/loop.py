@@ -86,9 +86,9 @@ class TaskEngine:
         self.step_handler = StepHandler()
 
     async def run(self, *, task: TaskRun, handler) -> TaskRun:
-        self.repository.create_task(task)
-        await self._emit("task.created", task)
-        return await self._execute_initial(task=task, handler=handler, resume_payload=None)
+        saved = self.repository.create_direct_task(task)
+        await self._emit("task.created", saved)
+        return await self._execute_initial(task=saved, handler=handler, resume_payload=None)
 
     async def enqueue_pending(self, *, task: TaskRun) -> TaskRun:
         saved = self.repository.create_pending_task(task)
@@ -96,6 +96,13 @@ class TaskEngine:
         return saved
 
     async def run_claimed(self, *, task: TaskRun, handler) -> TaskRun:
+        latest = self.repository.get_task(task.task_run_id) or task
+        queue_status = str(getattr(latest, "queue_status", "") or "")
+        claim_owner = str(getattr(latest, "claim_owner", "") or "")
+        # run_claimed는 supervisor가 durable queue에서 claim한 작업만 실행한다.
+        # direct 실행이 이 경로로 들어오면 같은 TaskRun을 두 실행자가 동시에 돌릴 수 있다.
+        if queue_status not in {"claimed", "running"} or not claim_owner:
+            raise RuntimeError(f"TaskRun is not claimed by a supervisor worker: {task.task_run_id}")
         return await self._execute_initial(task=task, handler=handler, resume_payload=None)
 
     async def _execute_initial(self, *, task: TaskRun, handler, resume_payload: dict | None) -> TaskRun:
@@ -103,18 +110,30 @@ class TaskEngine:
         task.status = TaskStatus.RUNNING
         task.started_at = task.started_at or utc_now()
         task.wait_payload = {}
-        task.current_step_run_id = None
+        step = self.planner.materialize_runtime_step(
+            task=task,
+            handler=handler,
+            input_payload=task.input_payload,
+            step_order=1,
+        )
+        ensure_step_transition(step.status, StepStatus.RUNNING)
+        step.status = StepStatus.RUNNING
+        step.started_at = step.started_at or task.started_at
+        task.current_step_run_id = step.step_run_id
+        self.repository.create_step(step)
         self.repository.update_task(task)
         self._touch_linked_work_run(task)
         await self._emit("task.started", task)
+        await self._emit("step.created", task, step)
+        await self._emit("step.started", task, step)
 
         try:
-            progress_sink = self._build_progress_sink(task=task, step=None)
+            progress_sink = self._build_progress_sink(task=task, step=step)
             outcome = normalize_handler_outcome(
                 await self.step_handler.execute(
                     handler=handler,
                     task=task,
-                    step=None,
+                    step=step,
                     resume_payload=resume_payload,
                     progress_sink=progress_sink,
                     delegate_executor=self._build_delegate_executor(task=task, handler=handler, progress_sink=progress_sink),
@@ -123,188 +142,8 @@ class TaskEngine:
             )
         except Exception as error:
             outcome = self._build_handler_failure_outcome(error)
-            return await self._apply_task_outcome_without_step(task=task, outcome=outcome)
-
         live_step = self.repository.get_step(task.current_step_run_id) if task.current_step_run_id else None
-        if live_step is not None:
-            synced_step = await self._materialize_initial_observed_steps(task=task, handler=handler, outcome=outcome)
-            if synced_step is not None:
-                live_step = synced_step
-            return await self._apply_outcome(task=task, step=live_step, handler=handler, outcome=outcome)
-
-        step = await self._materialize_initial_observed_steps(task=task, handler=handler, outcome=outcome)
-        if step is None:
-            return await self._apply_task_outcome_without_step(task=task, outcome=outcome)
-
-        return await self._apply_outcome(task=task, step=step, handler=handler, outcome=outcome)
-
-    async def _materialize_initial_observed_steps(
-        self,
-        *,
-        task: TaskRun,
-        handler,
-        outcome: dict,
-    ) -> StepRun | None:
-        observed_steps = [item for item in outcome.get("observed_steps") or [] if isinstance(item, dict)]
-        if not observed_steps:
-            return None
-
-        observed_step = self._current_observed_step(observed_steps)
-        now = utc_now()
-        existing_steps = self.repository.list_steps(task.task_run_id)
-        existing_by_key = {
-            observed_key: existing_step
-            for existing_step in existing_steps
-            if (observed_key := self._observed_semantic_key(existing_step)) is not None
-        }
-        active_step: StepRun | None = None
-        for index, candidate in enumerate(self._observed_steps_to_materialize(observed_steps, observed_step), start=1):
-            observed_key = self._observed_key_from_payload(candidate, fallback=index)
-            semantic_key = f"observed.{observed_key}"
-            step = existing_by_key.get(semantic_key)
-            if step is None:
-                step = self.planner.materialize_observed_semantic_step(
-                    task=task,
-                    handler=handler,
-                    input_payload=task.input_payload,
-                    step_order=index,
-                    observed_step=candidate,
-                    outcome=outcome,
-                    include_outcome_detail=candidate is observed_step,
-                )
-                self.repository.create_step(step)
-                existing_by_key[semantic_key] = step
-                await self._emit("step.created", task, step)
-            else:
-                self._refresh_observed_step_from_payload(
-                    step=step,
-                    observed_step=candidate,
-                    outcome=outcome if candidate is observed_step else {},
-                )
-
-            candidate_status = str(candidate.get("status") or "").strip().lower()
-            should_start_step = candidate is observed_step or candidate_status == "completed"
-            if should_start_step and not step_is_terminal(step.status) and step.status != StepStatus.RUNNING:
-                step.status = StepStatus.RUNNING
-                step.started_at = step.started_at or task.started_at or now
-                self.repository.update_step(step)
-                await self._emit("step.started", task, step)
-
-            if candidate is observed_step:
-                active_step = step
-                if candidate_status == "completed":
-                    await self._complete_observed_step(task=task, step=step, now=now)
-                continue
-
-            # 모델이 이미 완료했다고 선언한 선행 의미 단계는 별도 StepRun으로 닫아
-            # 프론트가 한 요청 안의 사용자 가시 단계를 여러 줄로 복원할 수 있게 한다.
-            if candidate_status == "completed":
-                await self._complete_observed_step(task=task, step=step, now=now)
-
-        if active_step is None:
-            return None
-        existing_current = self.repository.get_step(task.current_step_run_id) if task.current_step_run_id else None
-        if (
-            existing_current is not None
-            and existing_current.step_run_id != active_step.step_run_id
-            and step_is_terminal(active_step.status)
-            and not step_is_terminal(existing_current.status)
-        ):
-            # progress sink가 pending 단계를 이미 RUNNING으로 전환했는데,
-            # 최종 outcome의 마지막 step tool 결과가 예전 active 단계를 가리킬 수 있다.
-            # 이 경우 화면의 현재 단계와 tool 귀속이 되감기지 않도록 실제 current StepRun을 유지한다.
-            return existing_current
-        task.current_step_run_id = active_step.step_run_id
-        self.repository.update_task(task)
-        return active_step
-
-    @staticmethod
-    def _observed_key_from_payload(observed_step: dict, *, fallback: int) -> str:
-        return str(observed_step.get("id") or observed_step.get("key") or fallback).strip() or str(fallback)
-
-    def _refresh_observed_step_from_payload(self, *, step: StepRun, observed_step: dict, outcome: dict) -> None:
-        """모델이 같은 의미 단계의 제목/요약을 다시 보냈을 때 저장된 StepRun도 최신화한다."""
-
-        title = str(observed_step.get("title") or observed_step.get("summary") or step.title or step.step_type)
-        summary = str(observed_step.get("summary") or title)
-        goal = str(observed_step.get("goal") or step.input_payload.get("observed_step_goal") or summary or title)
-        step.title = title
-        step.summary_message = summary
-        step.input_payload = {
-            **dict(step.input_payload or {}),
-            "observed_step_title": title,
-            "observed_step_summary": summary,
-            "observed_step_goal": goal,
-        }
-        step.detail_json = merge_step_detail(step.detail_json, outcome.get("detail_json"))
-        step.detail_json = merge_step_detail(
-            step.detail_json,
-            build_semantic_step_detail(
-                step_run_id=step.step_run_id,
-                semantic_key=semantic_key_of(step.detail_json) or self._observed_semantic_key(step) or step.step_type,
-                semantic_step=title,
-                semantic_goal=goal,
-                lifecycle="completed" if step_is_terminal(step.status) else "running",
-            ),
-        )
-        self.repository.update_step(step)
-
-    async def _complete_observed_step(self, *, task: TaskRun, step: StepRun, now) -> None:
-        if step.status == StepStatus.COMPLETED:
-            return
-        if step_is_terminal(step.status):
-            return
-        ensure_step_transition(step.status, StepStatus.COMPLETED)
-        step.status = StepStatus.COMPLETED
-        step.ended_at = step.ended_at or now
-        step.detail_json = merge_step_detail(
-            step.detail_json,
-            build_semantic_step_detail(
-                step_run_id=step.step_run_id,
-                semantic_key=semantic_key_of(step.detail_json) or self._observed_semantic_key(step) or step.step_type,
-                semantic_step=step.input_payload.get("observed_step_title") or step.title or step.step_type,
-                semantic_goal=step.input_payload.get("observed_step_goal") or step.title or step.step_type,
-                lifecycle="completed",
-                status=infer_semantic_status(
-                    lifecycle="completed",
-                    operation_detail=step.detail_json.get("operationDetail"),
-                ),
-            ),
-        )
-        self.repository.update_step(step)
-        await self._emit("step.completed", task, step)
-
-    @staticmethod
-    def _current_observed_step(observed_steps: list[dict]) -> dict:
-        # 여러 observed step 중 실제 outcome을 적용할 실행 anchor 하나를 고른다.
-        # 이미 완료된 선행 단계는 별도 StepRun으로 닫고, 이 단계에 최종 detail을 병합한다.
-        for preferred_status in ("in_progress", "pending"):
-            selected = next(
-                (
-                    observed_step
-                    for observed_step in observed_steps
-                    if str(observed_step.get("status") or "").strip().lower() == preferred_status
-                ),
-                None,
-            )
-            if selected is not None:
-                return selected
-        return observed_steps[-1]
-
-    @staticmethod
-    def _observed_steps_to_materialize(observed_steps: list[dict], current_step: dict) -> list[dict]:
-        _ = current_step
-        # LLM이 pending 단계를 active 단계보다 먼저 적는 경우가 있다. 화면은 실행 흐름을 위에서
-        # 아래로 읽어야 하므로 완료된 선행 단계, 현재 진행 단계, 대기 단계 순서로 보정한다.
-        order = {"completed": 0, "in_progress": 1, "pending": 2, "cancelled": 3}
-        indexed_steps = list(enumerate(observed_steps))
-        indexed_steps.sort(
-            key=lambda item: (
-                order.get(str(item[1].get("status") or "pending").strip().lower(), 2),
-                item[0],
-            )
-        )
-        return [step for _, step in indexed_steps]
+        return await self._apply_outcome(task=task, step=live_step or step, handler=handler, outcome=outcome)
 
     async def resume(self, *, task: TaskRun, handler, approval_id: str, payload: dict) -> TaskRun:
         approval = self.approval_service.resolve(approval_id, payload)
@@ -675,18 +514,15 @@ class TaskEngine:
         step.error_message = outcome.get("error_message")
         step.detail_json = merge_step_detail(step.detail_json, outcome.get("detail_json"))
         semantic_lifecycle = semantic_lifecycle_for_status(task_status)
-        observed_semantic_key = self._observed_semantic_key(step)
         step.detail_json = merge_step_detail(
             step.detail_json,
             build_semantic_step_detail(
                 step_run_id=step.step_run_id,
-                semantic_key=semantic_key_of(step.detail_json) or observed_semantic_key or step.step_type,
+                semantic_key=semantic_key_of(step.detail_json) or step.step_type,
                 semantic_step=(step.detail_json.get("semanticDetail") or {}).get("semanticStep")
-                or step.input_payload.get("observed_step_title")
                 or step.title
                 or step.step_type,
                 semantic_goal=(step.detail_json.get("semanticDetail") or {}).get("goal")
-                or step.input_payload.get("observed_step_goal")
                 or step.title
                 or step.step_type,
                 lifecycle=semantic_lifecycle,
@@ -767,13 +603,11 @@ class TaskEngine:
                 candidate.detail_json,
                 build_semantic_step_detail(
                     step_run_id=candidate.step_run_id,
-                    semantic_key=semantic_key_of(candidate.detail_json) or self._observed_semantic_key(candidate) or candidate.step_type,
+                    semantic_key=semantic_key_of(candidate.detail_json) or candidate.step_type,
                     semantic_step=(candidate.detail_json.get("semanticDetail") or {}).get("semanticStep")
-                    or candidate.input_payload.get("observed_step_title")
                     or candidate.title
                     or candidate.step_type,
                     semantic_goal=(candidate.detail_json.get("semanticDetail") or {}).get("goal")
-                    or candidate.input_payload.get("observed_step_goal")
                     or candidate.title
                     or candidate.step_type,
                     lifecycle="canceled",
@@ -783,13 +617,6 @@ class TaskEngine:
             self.repository.update_step(candidate)
             await self._emit("step.canceled", task, candidate)
 
-    @staticmethod
-    def _observed_semantic_key(step: StepRun) -> str | None:
-        observed_step_key = str(step.input_payload.get("observed_step_key") or "").strip()
-        if not observed_step_key:
-            return None
-        return f"observed.{observed_step_key}"
-
     def _build_progress_sink(self, *, task: TaskRun, step: StepRun | None):
         current_step = step
         handler = self.tool_registry.resolve()
@@ -797,6 +624,25 @@ class TaskEngine:
         async def sink(*, event_type: str, summary_message: str | None = None, payload: dict | None = None) -> None:
             nonlocal current_step
             payload = payload or {}
+            if event_type == "model.progress.updated":
+                updated_step = self._apply_model_progress_update(
+                    task=task,
+                    step=current_step,
+                    payload=payload,
+                    summary_message=summary_message,
+                )
+                if updated_step is not None:
+                    current_step = updated_step
+                    sink.current_step = current_step
+                    self._touch_linked_work_run(task)
+                    await self._emit(
+                        "step.updated",
+                        task,
+                        current_step,
+                        payload={"reason": "model.progress", **payload},
+                        summary_message=current_step.summary_message,
+                    )
+                return
             observed_step = await self._materialize_progress_step(
                 task=task,
                 handler=handler,
@@ -814,6 +660,57 @@ class TaskEngine:
 
         sink.current_step = current_step
         return sink
+
+    def _apply_model_progress_update(
+        self,
+        *,
+        task: TaskRun,
+        step: StepRun | None,
+        payload: dict,
+        summary_message: str | None,
+    ) -> StepRun | None:
+        """LLM 응답 envelope의 진행 상태를 현재 StepRun에 반영한다.
+
+        StepRun 생성과 상태 전이는 서버가 소유하고, 모델은 사용자에게 보여 줄 제목/요약 같은
+        진행 설명만 제안한다. 따라서 여기서는 새 StepRun을 만들지 않고 현재 실행 anchor의
+        표시 정보만 갱신한다.
+        """
+
+        if step is None and task.current_step_run_id:
+            step = self.repository.get_step(task.current_step_run_id)
+        if step is None:
+            return None
+        update = payload.get("progressUpdate") if isinstance(payload.get("progressUpdate"), dict) else payload
+        if not isinstance(update, dict):
+            return None
+        title = self._compact_progress_text(update.get("title") or update.get("step") or update.get("label"), max_length=80)
+        summary = self._compact_progress_text(
+            summary_message or update.get("summary") or update.get("message") or update.get("statusMessage"),
+            max_length=160,
+        )
+        if title:
+            step.title = title
+        if summary:
+            step.summary_message = summary
+        detail_patch = {
+            "progressUpdate": {
+                **dict(update),
+                "turn": payload.get("turn"),
+                "source": "assistant_response",
+            }
+        }
+        step.detail_json = merge_step_detail(step.detail_json, detail_patch)
+        self.repository.update_step(step)
+        return step
+
+    @staticmethod
+    def _compact_progress_text(value, *, max_length: int) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = " ".join(value.split())
+        if not text:
+            return None
+        return text[:max_length].rstrip()
 
     def _touch_linked_work_run(self, task: TaskRun) -> None:
         if self.work_repository is None:
@@ -979,10 +876,10 @@ class TaskEngine:
             if step is None:
                 return {
                     "ok": False,
-                    "content": "delegate_task 실행 전에 step 도구로 현재 의미 단계를 먼저 in_progress로 선언해야 합니다.",
+                    "content": "delegate_task 실행에 필요한 현재 StepRun 실행 anchor가 없습니다.",
                     "error": {
-                        "code": "step_required_before_delegate",
-                        "message": "delegate_task requires an active LLM-declared step.",
+                        "code": "runtime_step_required_before_delegate",
+                        "message": "delegate_task requires an active runtime-owned StepRun.",
                     },
                     "child_session": child_session,
                 }
@@ -1025,10 +922,10 @@ class TaskEngine:
                 return {
                     **accepted_result,
                     "ok": False,
-                    "content": "session_agent_task 실행 전에 step 도구로 현재 의미 단계를 먼저 in_progress로 선언해야 합니다.",
+                    "content": "session_agent_task 실행에 필요한 현재 StepRun 실행 anchor가 없습니다.",
                     "error": {
-                        "code": "step_required_before_session_agent_task",
-                        "message": "session_agent_task requires an active LLM-declared step.",
+                        "code": "runtime_step_required_before_session_agent_task",
+                        "message": "session_agent_task requires an active runtime-owned StepRun.",
                     },
                 }
             if step.status == StepStatus.PENDING:
@@ -1060,7 +957,7 @@ class TaskEngine:
                     handler=handler,
                     task_run_id=task_run_id,
                 )
-                self.repository.create_task(child_task)
+                self.repository.create_direct_task(child_task)
                 await self._emit("task.created", child_task)
                 service.mark_run_started(work_id=work.work_id, task_run_id=task_run_id)
                 await self._notify_step_updated(
@@ -1082,7 +979,7 @@ class TaskEngine:
                     },
                     summary_message=f"{work.identifier} 세션 에이전트 실행 중",
                 )
-                child_task = await self.run_claimed(task=child_task, handler=handler)
+                child_task = await self._execute_initial(task=child_task, handler=handler, resume_payload=None)
                 updated_work = service.apply_task_result(work_id=work.work_id, task=child_task)
                 if updated_work is not None:
                     self._record_session_agent_parent_result_comment(work=updated_work, task=child_task)
@@ -1165,8 +1062,10 @@ class TaskEngine:
             "conversation_history": [],
             "system_prompt_snapshot": parent_input.get("system_prompt_snapshot") or "",
             "model": parent_input.get("model"),
-            "enabled_toolsets": ["skills", "session", "planning", "terminal", "file", "web", "browser", "work"],
-            "toolsets": ["skills", "session", "planning", "terminal", "file", "web", "browser", "work"],
+            "sessionId": parent_input.get("sessionId") or parent_task.session_key or work.session_id,
+            "promptMessageId": parent_input.get("promptMessageId") or parent_input.get("prompt_message_id"),
+            "enabled_toolsets": ["skills", "session", "planning", "terminal", "file", "web", "work"],
+            "toolsets": ["skills", "session", "planning", "terminal", "file", "web", "work"],
             "max_iterations": self._work_execution_max_iterations(),
             "parentWorkId": work.parent_id,
         }
@@ -1188,6 +1087,9 @@ class TaskEngine:
         profile_model = self._profile_model(profile)
         if profile_model:
             payload["model"] = profile_model
+        profile_provider = self._profile_provider_name(profile)
+        if profile_provider:
+            payload["provider_name"] = profile_provider
         payload["targetAgentProfile"] = {
             "profileId": profile.get("profile_id"),
             "profileKey": profile.get("profile_key"),
@@ -1238,6 +1140,20 @@ class TaskEngine:
         config = profile.get("config_snapshot") if isinstance(profile.get("config_snapshot"), dict) else {}
         value = config.get("model") or profile.get("model_name")
         text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _profile_provider_name(profile: dict) -> str | None:
+        config = profile.get("config_snapshot") if isinstance(profile.get("config_snapshot"), dict) else {}
+        model = str(config.get("model") or profile.get("model_name") or "").strip()
+        if model.lower().startswith("gemini-"):
+            return "gemini_api_key"
+        value = config.get("providerName") or config.get("provider_name") or config.get("adapterType") or profile.get("provider_name")
+        text = str(value or "").strip()
+        if text == "openai":
+            return "openai_api_key"
+        if text == "gemini":
+            return "gemini_api_key"
         return text or None
 
     def _create_work_transcript_session(self, *, parent_task: TaskRun, work, model: str | None) -> str | None:
@@ -1334,9 +1250,10 @@ class TaskEngine:
         if not work.parent_id:
             return None
         child_status = str(work.status or "").strip()
-        if child_status == "blocked":
-            parent_status = "blocked"
-        elif child_status == "done":
+        # 한 자식이 blocked 됐다고 부모를 같이 blocked 로 잠그면, A → (B, C) 같은 DAG 에서
+        # B 실패가 C 실행까지 차단해 버린다. 부모 status 는 모든 sibling 의 종합 결과로만
+        # 결정되어야 하므로 child blocked 는 in_review 로 올려 다른 형제 작업이 계속 흐르게 한다.
+        if child_status == "done":
             parent_status = "done"
         else:
             parent_status = "in_review"
@@ -1367,29 +1284,14 @@ class TaskEngine:
         await callback(step=step, event_type=event_type, payload=payload, summary_message=summary_message)
 
     async def _materialize_progress_step(self, *, task: TaskRun, handler, event_type: str, payload: dict) -> StepRun | None:
-        """tool_call 관찰값에서 StepRun(LLM이 판단한 자연어 의미 단계)을 즉시 만든다.
+        """새 실행에서는 tool event가 StepRun을 만들지 않는다.
 
-        첫 provider 호출 전에는 StepRun을 만들지 않지만, assistant가 `step` runtime tool
-        호출로 단계 제목/목표를 제안한 뒤에는 더 이상 완료까지 기다릴 이유가 없다.
-        이 시점부터 후속 tool 이벤트를 같은 StepRun에 묶어 프론트가 진행 중 상태를 볼 수 있게 한다.
+        StepRun은 TaskRun 시작 시 서버가 선생성한 실행 anchor이고, tool event는 그 안의 operation으로만
+        누적된다. 이 메서드는 과거 호출 지점을 유지하되 새 StepRun 생성 책임은 갖지 않는다.
         """
 
-        if event_type != "tool.started":
-            return None
-        if str(payload.get("tool_name") or payload.get("toolName") or "").strip() != "step":
-            return None
-        observed_steps = [item for item in payload.get("steps") or [] if isinstance(item, dict)]
-        if not observed_steps:
-            return None
-        outcome = {
-            "observed_steps": observed_steps,
-            "summary_message": payload.get("title"),
-            "detail_json": {},
-        }
-        materialized = await self._materialize_initial_observed_steps(task=task, handler=handler, outcome=outcome)
-        if materialized is None:
-            return None
-        return materialized
+        _ = (task, handler, event_type, payload)
+        return None
 
     async def _emit(
         self,

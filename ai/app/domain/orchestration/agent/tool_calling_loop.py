@@ -4,14 +4,21 @@ import asyncio
 import inspect
 import json
 import re
+import time
 from typing import Any
 
 from app.contracts.task.step_status import StepStatus
 from app.contracts.task.task_status import TaskStatus
 from app.core.utils.ids import new_id
 from app.domain.orchestration.capabilities import apply_task_capabilities
+from app.domain.orchestration.agent.tool_failure_circuit import (
+    RunLocalToolFailureCircuit,
+    build_provider_failure_payload,
+    classify_provider_failure,
+)
 from app.domain.orchestration.agent.tool_guard import ToolGuard, ToolGuardDecision, ToolGuardResult
-from app.domain.providers.model.base import AgentMessage, AgentModelResponse, ToolResultMessage
+from app.domain.orchestration.agent.tool_result_store import store_raw_tool_result
+from app.domain.providers.model.base import AgentMessage, AgentModelResponse, ToolResultMessage, parse_assistant_response_contract
 from app.domain.orchestration.prompts.prompt_builder import assemble_agent_loop_messages
 from app.domain.session.sessions.transcript_store import TranscriptStore
 from app.domain.orchestration.runtime_planning.todo_state import (
@@ -25,6 +32,11 @@ from app.domain.orchestration.runtime_planning.todo_state import (
 class ToolCallingLoopHandler:
     """현재 provider 위에서 native tool call(모델이 구조화된 도구 호출을 직접 반환하는 방식) loop를 실행한다."""
 
+    TOOL_RESULT_OBSERVATION_MAX_CHARS = 12_000
+    TOOL_RESULT_INLINE_MAX_CHARS = 12_000
+    TOOL_RESULT_PREVIEW_MAX_CHARS = 6_000
+    TOOL_RESULT_ARRAY_SAMPLE_SIZE = 3
+
     def __init__(
         self,
         provider,
@@ -33,8 +45,10 @@ class ToolCallingLoopHandler:
         tool_catalog,
         session_store: TranscriptStore | None = None,
         tool_guard=None,
+        provider_registry=None,
     ) -> None:
         self.provider = provider
+        self.provider_registry = provider_registry
         self.prompt_builder = prompt_builder
         self.tool_runtime = tool_runtime
         self.tool_catalog = tool_catalog
@@ -110,6 +124,7 @@ class ToolCallingLoopHandler:
 
         all_tool_results: list[dict[str, Any]] = []
         operations: list[dict[str, Any]] = []
+        failure_circuit = RunLocalToolFailureCircuit()
         max_iterations = self._max_iterations(task_input)
         model = self._optional_text(task_input.get("model")) or self._provider_default_model()
         transcript_session_id = self._ensure_transcript_session(task=task, task_input=task_input, model=model)
@@ -143,6 +158,11 @@ class ToolCallingLoopHandler:
                     operations=operations,
                     operation_counters=operation_counters,
                 )
+                failure_circuit.record_result(
+                    tool_name=str(resumed_tool_result.get("name") or ""),
+                    args=dict(resumed_tool_result.get("args") or {}),
+                    result=resumed_tool_result.get("result"),
+                )
                 messages = self._order_tool_results_for_replay(messages)
                 current_todo_state = self._next_todo_state(current_todo_state, all_tool_results)
         new_turn_messages = self._new_turn_messages(task_input=task_input, prompt=prompt, replay_messages=messages)
@@ -153,16 +173,74 @@ class ToolCallingLoopHandler:
         llm_call_count = 0
 
         for turn_index in range(1, max_iterations + 1):
-            generated = await self._respond_with_runtime_context_async(
+            model_started_at = time.perf_counter()
+            runtime_context = self._model_runtime_context(task=task, step=step, task_input=task_input)
+            await self._emit_model_call_progress(
+                progress_sink=progress_sink,
+                event_type="model.started",
+                turn_index=turn_index,
+                model=model,
+                runtime_context=runtime_context,
                 messages=messages,
                 tools=provider_tools,
-                model=model,
-                tool_choice=None,
-                runtime_context=self._model_runtime_context(task=task, step=step, task_input=task_input),
             )
+            try:
+                generated = await self._respond_with_runtime_context_async(
+                    messages=messages,
+                    tools=provider_tools,
+                    model=model,
+                    tool_choice=None,
+                    runtime_context=runtime_context,
+                )
+            except Exception as exc:
+                await self._emit_model_call_progress(
+                    progress_sink=progress_sink,
+                    event_type="model.failed",
+                    turn_index=turn_index,
+                    model=model,
+                    runtime_context=runtime_context,
+                    messages=messages,
+                    tools=provider_tools,
+                    duration_ms=self._elapsed_ms(model_started_at),
+                    error=exc,
+                )
+                provider_failure = classify_provider_failure(exc)
+                if provider_failure is None:
+                    raise
+                return self._build_provider_failure_outcome(
+                    task_input=task_input,
+                    prompt=prompt,
+                    failure_payload=build_provider_failure_payload(provider_failure),
+                    tool_results=all_tool_results,
+                    operations=operations,
+                    llm_call_count=llm_call_count,
+                    todo_state=current_todo_state,
+                    operation_counters=operation_counters,
+                )
             llm_call_count += 1
+            await self._emit_model_call_progress(
+                progress_sink=progress_sink,
+                event_type="model.completed",
+                turn_index=turn_index,
+                model=self._model_name(generated, task_input),
+                runtime_context=runtime_context,
+                messages=messages,
+                tools=provider_tools,
+                duration_ms=self._elapsed_ms(model_started_at),
+                generated=generated,
+            )
             messages.append(generated.message)
             self._append_transcript_message(transcript_session_id, generated.message, finish_reason=generated.finish_reason)
+            response_contract = self._response_contract_from_model_response(generated)
+            progress_update = generated.progress_update if isinstance(generated.progress_update, dict) else response_contract.get("progressUpdate")
+            if isinstance(progress_update, dict):
+                await self._emit_model_progress_update(
+                    progress_sink=progress_sink,
+                    progress_update=progress_update,
+                    turn_index=turn_index,
+                    generated=generated,
+                )
+            visible_output_text = str(generated.visible_text or response_contract.get("text") or generated.output_text or "")
             operations.append(
                 {
                     "key": self._next_operation_key(
@@ -173,17 +251,18 @@ class ToolCallingLoopHandler:
                     "title": f"모델 응답 생성 {turn_index}",
                     "kind": "llm",
                     "status": "completed",
-                    "summary": generated.output_text[:80] or f"tool_calls={len(generated.tool_calls)}",
+                    "summary": visible_output_text[:80] or self._progress_summary(progress_update) or f"tool_calls={len(generated.tool_calls)}",
                 }
             )
 
             if not generated.tool_calls:
-                final_text = generated.output_text
+                final_text = visible_output_text
                 return self._build_completed_outcome(
                     task_input=task_input,
                     prompt=prompt,
                     generated=generated,
                     final_text=final_text,
+                    response_contract=response_contract,
                     tool_results=all_tool_results,
                     operations=operations,
                     llm_call_count=llm_call_count,
@@ -195,6 +274,7 @@ class ToolCallingLoopHandler:
             delegate_boundary_started = False
             for tool_call_index, tool_call in enumerate(generated.tool_calls):
                 runtime_tool_name = self._runtime_tool_name(tool_call.name, provider_tool_name_map)
+                circuit_decision = None
                 if delegate_boundary_started and runtime_tool_name != "delegate_task":
                     # worker 결과가 돌아온 뒤 같은 assistant 응답 안의 후속 실행 도구를 바로 돌리면
                     # "조사 worker 진행 중 -> 문서 작성" 순서가 뒤섞인다. provider tool_call 불변식은
@@ -276,46 +356,60 @@ class ToolCallingLoopHandler:
                     # BLOCK도 전체 실패가 아니라 막힌 tool result로 transcript에 남겨 LLM이 다음 행동을 정한다.
                     result = self._blocked_tool_result(guard_result)
                 else:
-                    await self._emit_tool_progress(
-                        progress_sink=progress_sink,
-                        event_type="tool.started",
-                        tool_call_id=tool_call.id,
+                    circuit_decision = failure_circuit.pre_call_decision(
                         tool_name=runtime_tool_name,
                         args=tool_call.arguments,
-                        result=None,
                     )
-                    # PoC 단계 2: run_call이 동기 함수인데 내부에서 브릿지 위임 시
-                    # 메인 이벤트 루프에 코루틴을 던지고 동기 차단으로 결과 대기 → 데드락.
-                    # to_thread로 별도 스레드에 옮겨 메인 루프가 자유롭게 굴러가게 한다.
-                    result = await asyncio.to_thread(
-                        self._run_native_tool_call,
-                        name=runtime_tool_name,
-                        args=tool_call.arguments,
-                        requested_toolsets=requested_toolsets,
-                        tool_runtime=tool_runtime,
-                    )
-                    if runtime_tool_name == "delegate_task" and delegate_executor is not None:
-                        result = await self._execute_delegate_tool_result(
-                            delegate_executor=delegate_executor,
+                    if circuit_decision.action == "block_with_synthetic_result" and circuit_decision.record is not None:
+                        result = failure_circuit.build_blocked_result(record=circuit_decision.record)
+                        failure_circuit.record_block(circuit_decision.record)
+                    else:
+                        await self._emit_tool_progress(
+                            progress_sink=progress_sink,
+                            event_type="tool.started",
                             tool_call_id=tool_call.id,
+                            tool_name=runtime_tool_name,
                             args=tool_call.arguments,
-                            accepted_result=result,
+                            result=None,
                         )
-                        delegate_boundary_started = True
-                    if runtime_tool_name == "session_agent_task" and session_agent_executor is not None:
-                        result = await self._execute_session_agent_tool_result(
-                            session_agent_executor=session_agent_executor,
-                            tool_call_id=tool_call.id,
+                        # PoC 단계 2: run_call이 동기 함수인데 내부에서 브릿지 위임 시
+                        # 메인 이벤트 루프에 코루틴을 던지고 동기 차단으로 결과 대기 → 데드락.
+                        # to_thread로 별도 스레드에 옮겨 메인 루프가 자유롭게 굴러가게 한다.
+                        result = await asyncio.to_thread(
+                            self._run_native_tool_call,
+                            name=runtime_tool_name,
                             args=tool_call.arguments,
-                            accepted_result=result,
+                            requested_toolsets=requested_toolsets,
+                            tool_runtime=tool_runtime,
+                        )
+                        if runtime_tool_name == "delegate_task" and delegate_executor is not None:
+                            result = await self._execute_delegate_tool_result(
+                                delegate_executor=delegate_executor,
+                                tool_call_id=tool_call.id,
+                                args=tool_call.arguments,
+                                accepted_result=result,
+                            )
+                            delegate_boundary_started = True
+                        if runtime_tool_name == "session_agent_task" and session_agent_executor is not None:
+                            result = await self._execute_session_agent_tool_result(
+                                session_agent_executor=session_agent_executor,
+                                tool_call_id=tool_call.id,
+                                args=tool_call.arguments,
+                                accepted_result=result,
+                            )
+                        failure_circuit.record_result(
+                            tool_name=runtime_tool_name,
+                            args=tool_call.arguments,
+                            result=result,
                         )
                 tool_result = {
                     "tool_call_id": tool_call.id,
                     "name": runtime_tool_name,
                     "args": tool_call.arguments,
                     "result": result,
+                    "task_run_id": getattr(task, "id", None) or getattr(task, "task_run_id", None),
                 }
-                self._append_tool_result_observation(
+                stored_tool_result = self._append_tool_result_observation(
                     tool_result=tool_result,
                     all_tool_results=all_tool_results,
                     messages=messages,
@@ -329,13 +423,40 @@ class ToolCallingLoopHandler:
                     tool_call_id=tool_call.id,
                     tool_name=runtime_tool_name,
                     args=tool_call.arguments,
-                    result=result,
+                    result=stored_tool_result.get("result"),
                 )
                 self._sync_dynamic_runtime_context(
                     task=task,
                     task_input=task_input,
                     tool_runtime=tool_runtime,
                 )
+                if (
+                    decision != ToolGuardDecision.BLOCK
+                    and circuit_decision is not None
+                    and circuit_decision.action == "block_with_synthetic_result"
+                    and circuit_decision.should_abort
+                ):
+                    self._append_circuit_deferred_siblings(
+                        generated_tool_calls=generated.tool_calls,
+                        start_index=tool_call_index + 1,
+                        provider_tool_name_map=provider_tool_name_map,
+                        all_tool_results=all_tool_results,
+                        messages=messages,
+                        transcript_session_id=transcript_session_id,
+                        operations=operations,
+                        operation_counters=operation_counters,
+                    )
+                    current_todo_state = self._next_todo_state(current_todo_state, all_tool_results)
+                    return self._build_circuit_blocked_outcome(
+                        task_input=task_input,
+                        generated=generated,
+                        tool_results=all_tool_results,
+                        operations=operations,
+                        llm_call_count=llm_call_count,
+                        todo_state=current_todo_state,
+                        operation_counters=operation_counters,
+                        result=result,
+                    )
             current_todo_state = self._next_todo_state(current_todo_state, all_tool_results)
 
         return self._build_failed_outcome(
@@ -359,7 +480,8 @@ class ToolCallingLoopHandler:
         """새 user turn에 필요한 provider message를 만든다.
 
         transcript replay가 이미 있으면 approval 재개나 tool_call continuation 상태이므로 공개 대화
-        history를 다시 섞지 않는다. 새 공개 대화 턴에서만 product history를 native message로 앞에 붙인다.
+        history를 다시 섞지 않는다. 새 공개 대화 턴에서는 product history를 참고 블록으로 낮추고,
+        현재 turn 실행 지시는 별도 current_turn 블록으로 격리한다.
         """
 
         if replay_messages:
@@ -608,6 +730,8 @@ class ToolCallingLoopHandler:
         child_work = accepted_result.get("child_work")
         if not isinstance(child_work, dict):
             return accepted_result
+        if accepted_result.get("startExecution") is False:
+            return accepted_result
         return await session_agent_executor(
             child_work=dict(child_work),
             tool_call_id=tool_call_id,
@@ -639,14 +763,84 @@ class ToolCallingLoopHandler:
             ),
         )
 
+    async def _emit_model_call_progress(
+        self,
+        *,
+        progress_sink,
+        event_type: str,
+        turn_index: int,
+        model: str,
+        runtime_context: dict[str, Any],
+        messages: list[AgentMessage | ToolResultMessage | dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        duration_ms: int | None = None,
+        generated: AgentModelResponse | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        if progress_sink is None:
+            return
+
+        payload: dict[str, Any] = {
+            "turnIndex": turn_index,
+            "model": model,
+            "providerName": str(runtime_context.get("provider_name") or runtime_context.get("providerName") or ""),
+            "messageCount": len(messages),
+            "toolSchemaCount": len(tools or []),
+        }
+        if duration_ms is not None:
+            payload["durationMs"] = duration_ms
+        if generated is not None:
+            payload.update(
+                {
+                    "finishReason": generated.finish_reason,
+                    "toolCallCount": len(generated.tool_calls),
+                    "outputTextLength": len(str(generated.output_text or "")),
+                    "visibleTextLength": len(str(generated.visible_text or "")),
+                    "usage": dict(generated.usage or {}),
+                }
+            )
+        if error is not None:
+            payload["error"] = {
+                "type": type(error).__name__,
+                "message": str(error)[:500],
+            }
+
+        await progress_sink(
+            event_type=event_type,
+            summary_message=self._model_progress_summary(
+                event_type=event_type,
+                turn_index=turn_index,
+                duration_ms=duration_ms,
+                generated=generated,
+            ),
+            payload=payload,
+        )
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(0, int((time.perf_counter() - started_at) * 1000))
+
+    @staticmethod
+    def _model_progress_summary(
+        *,
+        event_type: str,
+        turn_index: int,
+        duration_ms: int | None,
+        generated: AgentModelResponse | None,
+    ) -> str:
+        if event_type == "model.started":
+            return f"모델 응답 생성 {turn_index} 시작"
+        if event_type == "model.failed":
+            return f"모델 응답 생성 {turn_index} 실패"
+        suffix = f" ({duration_ms}ms)" if duration_ms is not None else ""
+        if generated is not None and generated.tool_calls:
+            return f"모델 응답 생성 {turn_index} 완료: tool_calls={len(generated.tool_calls)}{suffix}"
+        return f"모델 응답 생성 {turn_index} 완료{suffix}"
+
     @classmethod
     def _tool_progress_summary(cls, *, tool_name: str, args: dict[str, Any], result: dict[str, Any] | None) -> str:
         if tool_name == "todo":
             active_title = cls._active_todo_title(args.get("todos"))
-            if active_title:
-                return active_title
-        if tool_name == "step":
-            active_title = cls._active_step_title(args.get("steps"))
             if active_title:
                 return active_title
         if tool_name == "write_file":
@@ -668,15 +862,6 @@ class ToolCallingLoopHandler:
             if summary:
                 return f"worker 결과 회수: {summary[:80]}"
             return f"{goal} worker 실행" if goal else "worker 실행"
-        if tool_name == "web_search":
-            query = cls._optional_text(args.get("query"))
-            return f"{query} 웹 검색" if query else "웹 검색"
-        if tool_name in {"web_extract", "web_crawl"}:
-            url = cls._optional_text(args.get("url"))
-            return f"{url} 자료 확인" if url else "웹 자료 확인"
-        if tool_name.startswith("browser_"):
-            url = cls._optional_text(args.get("url"))
-            return f"{url} 브라우저 확인" if url else f"{tool_name} 실행"
         return f"{tool_name} 실행"
 
     @classmethod
@@ -709,18 +894,6 @@ class ToolCallingLoopHandler:
                     "status": cls._optional_text(item.get("status")),
                 }
                 for item in todos[:12]
-            ]
-        if tool_name == "step":
-            steps = [item for item in args.get("steps") or [] if isinstance(item, dict)]
-            payload["steps"] = [
-                {
-                    "id": cls._optional_text(item.get("id") or item.get("key")),
-                    "title": cls._optional_text(item.get("title") or item.get("summary")),
-                    "summary": cls._optional_text(item.get("summary") or item.get("title")),
-                    "goal": cls._optional_text(item.get("goal")),
-                    "status": cls._optional_text(item.get("status")),
-                }
-                for item in steps[:12]
             ]
         if isinstance(result, dict):
             payload["result"] = cls._compact_progress_value(result)
@@ -797,21 +970,6 @@ class ToolCallingLoopHandler:
         return None
 
     @classmethod
-    def _active_step_title(cls, value: Any) -> str | None:
-        if not isinstance(value, list):
-            return None
-        for status in ("in_progress", "pending", "completed"):
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status") or "").strip().lower() != status:
-                    continue
-                title = cls._optional_text(item.get("summary") or item.get("title"))
-                if title:
-                    return title
-        return None
-
-    @classmethod
     def _terminal_command_summary(cls, args: dict[str, Any]) -> str | None:
         argv = args.get("argv")
         if isinstance(argv, list) and argv:
@@ -830,7 +988,7 @@ class ToolCallingLoopHandler:
 
     @staticmethod
     def _sync_dynamic_runtime_context(*, task, task_input: dict[str, Any], tool_runtime) -> None:
-        latest_input = dict(getattr(task, "input_payload", None) or {})
+        runtime_context = getattr(tool_runtime, "runtime_context", None)
         dynamic_keys = (
             "workId",
             "workIdentifier",
@@ -839,6 +997,22 @@ class ToolCallingLoopHandler:
             "workContext",
             "workLinkReason",
         )
+        if isinstance(runtime_context, dict):
+            # session_agent_task처럼 도구 실행 중 새로 연결된 work context는 tool runtime에 먼저 생긴다.
+            # 이 값을 TaskRun input에도 즉시 반영해야 이후 loop와 최종 WorkService 처리에서
+            # 같은 parent work/run 관계를 잃지 않는다.
+            runtime_updates = {
+                key: runtime_context[key]
+                for key in dynamic_keys
+                if key in runtime_context and task_input.get(key) != runtime_context[key]
+            }
+            if runtime_updates:
+                task_input.update(runtime_updates)
+                latest_input = dict(getattr(task, "input_payload", None) or {})
+                latest_input.update(runtime_updates)
+                task.input_payload = latest_input
+
+        latest_input = dict(getattr(task, "input_payload", None) or {})
         updates = {
             key: latest_input[key]
             for key in dynamic_keys
@@ -847,7 +1021,6 @@ class ToolCallingLoopHandler:
         if not updates:
             return
         task_input.update(updates)
-        runtime_context = getattr(tool_runtime, "runtime_context", None)
         if isinstance(runtime_context, dict):
             runtime_context.update(updates)
 
@@ -930,13 +1103,24 @@ class ToolCallingLoopHandler:
         transcript_session_id: str | None,
         operations: list[dict[str, Any]],
         operation_counters: dict[str, int],
-    ) -> None:
-        all_tool_results.append(tool_result)
+    ) -> dict[str, Any]:
         tool_name = str(tool_result["name"])
         result = tool_result["result"]
+        observed_result = self._tool_result_model_observation_result(
+            result,
+            tool_name=tool_name,
+            tool_call_id=str(tool_result["tool_call_id"]),
+            task_run_id=str(tool_result.get("task_run_id") or "") or None,
+        )
+        stored_tool_result = {
+            **tool_result,
+            "result": observed_result,
+        }
+        stored_tool_result.pop("task_run_id", None)
+        all_tool_results.append(stored_tool_result)
         tool_message = ToolResultMessage(
             tool_call_id=str(tool_result["tool_call_id"]),
-            content=self._tool_result_content(result),
+            content=self._tool_result_content(observed_result),
         )
         messages.append(tool_message)
         self._append_transcript_message(transcript_session_id, tool_message, tool_name=tool_name)
@@ -956,6 +1140,7 @@ class ToolCallingLoopHandler:
         if operation_error is not None:
             operation["error"] = operation_error
         operations.append(operation)
+        return stored_tool_result
 
     @staticmethod
     def _guard_decision(guard_result: ToolGuardResult) -> ToolGuardDecision:
@@ -973,16 +1158,17 @@ class ToolCallingLoopHandler:
         tool_choice: dict[str, Any] | str | None,
         runtime_context: dict[str, Any],
     ):
-        signature = inspect.signature(self.provider.respond)
+        provider = self._provider_for_runtime_context(runtime_context)
+        signature = inspect.signature(provider.respond)
         if "runtime_context" in signature.parameters:
-            return self.provider.respond(
+            return provider.respond(
                 messages=messages,
                 tools=tools,
                 model=model,
                 tool_choice=tool_choice,
                 runtime_context=runtime_context,
             )
-        return self.provider.respond(
+        return provider.respond(
             messages=messages,
             tools=tools,
             model=model,
@@ -998,7 +1184,8 @@ class ToolCallingLoopHandler:
         tool_choice: dict[str, Any] | str | None,
         runtime_context: dict[str, Any],
     ):
-        respond_async = getattr(self.provider, "respond_async", None)
+        provider = self._provider_for_runtime_context(runtime_context)
+        respond_async = getattr(provider, "respond_async", None)
         if callable(respond_async):
             signature = inspect.signature(respond_async)
             if "runtime_context" in signature.parameters:
@@ -1023,6 +1210,12 @@ class ToolCallingLoopHandler:
             tool_choice=tool_choice,
             runtime_context=runtime_context,
         )
+
+    def _provider_for_runtime_context(self, runtime_context: dict[str, Any]):
+        if self.provider_registry is None:
+            return self.provider
+        provider_name = runtime_context.get("provider_name") or runtime_context.get("providerName")
+        return self.provider_registry.model_provider_for(provider_name)
 
     @staticmethod
     def _model_runtime_context(*, task, step, task_input: dict[str, Any]) -> dict[str, Any]:
@@ -1110,10 +1303,178 @@ class ToolCallingLoopHandler:
         }
 
     @staticmethod
-    def _tool_result_content(result: dict[str, Any]) -> str:
-        if isinstance(result, dict) and isinstance(result.get("content"), str):
-            return str(result["content"])
-        return json.dumps(result, ensure_ascii=False)
+    def _deferred_tool_result_by_circuit(*, deferred_tool_name: str) -> dict[str, Any]:
+        message = f"{deferred_tool_name} 실행은 같은 assistant 응답에서 이전 도구가 circuit breaker로 중단되어 보류됐습니다."
+        payload = {"error": {"code": "tool_deferred_by_circuit_breaker", "message": message}}
+        return {
+            "ok": False,
+            "content": json.dumps(payload, ensure_ascii=False),
+            "error": {
+                "code": "tool_deferred_by_circuit_breaker",
+                "message": message,
+                "tool_name": deferred_tool_name,
+                "retryable": False,
+            },
+            "circuit_breaker": {
+                "scope": "run",
+                "blocked": True,
+            },
+        }
+
+    def _append_circuit_deferred_siblings(
+        self,
+        *,
+        generated_tool_calls,
+        start_index: int,
+        provider_tool_name_map: dict[str, str],
+        all_tool_results: list[dict[str, Any]],
+        messages: list[AgentMessage | ToolResultMessage],
+        transcript_session_id: str | None,
+        operations: list[dict[str, Any]],
+        operation_counters: dict[str, int],
+    ) -> None:
+        for sibling_call in generated_tool_calls[start_index:]:
+            sibling_runtime_name = self._runtime_tool_name(sibling_call.name, provider_tool_name_map)
+            sibling_result = {
+                "tool_call_id": sibling_call.id,
+                "name": sibling_runtime_name,
+                "args": sibling_call.arguments,
+                "result": self._deferred_tool_result_by_circuit(deferred_tool_name=sibling_runtime_name),
+            }
+            self._append_tool_result_observation(
+                tool_result=sibling_result,
+                all_tool_results=all_tool_results,
+                messages=messages,
+                transcript_session_id=transcript_session_id,
+                operations=operations,
+                operation_counters=operation_counters,
+            )
+
+    @staticmethod
+    def _tool_result_content(result: Any) -> str:
+        try:
+            return json.dumps(result, ensure_ascii=False, default=str)
+        except TypeError:
+            return json.dumps(str(result), ensure_ascii=False)
+
+    def _tool_result_model_observation_result(
+        self,
+        result: Any,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        task_run_id: str | None,
+    ) -> dict[str, Any]:
+        """큰 tool 원문은 별도 저장소로 빼고, 모델/DB에는 bounded observation만 남긴다."""
+
+        raw_text = self._stable_json(result)
+        if len(raw_text) <= self.TOOL_RESULT_INLINE_MAX_CHARS:
+            if isinstance(result, dict):
+                return result
+            return {"ok": True, "content": str(result)}
+
+        raw_meta = store_raw_tool_result(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            task_run_id=task_run_id,
+            result=result,
+        )
+        preview, preview_meta = self._preview_tool_result_value(result)
+        observation = {
+            "ok": self._tool_result_ok_value(result),
+            "content": (
+                "[...truncated tool result: "
+                f"kept preview of {raw_meta['raw_chars']} chars. "
+                "Use tool_result.read with raw_ref, or call the tool again with narrower parameters, "
+                "if the preview is insufficient.]"
+            ),
+            "observation_type": "tool_result_preview",
+            "tool_name": tool_name,
+            "truncated": True,
+            "raw_ref": raw_meta["raw_ref"],
+            "raw_chars": raw_meta["raw_chars"],
+            "expires_at": raw_meta["expires_at"],
+            "preview": preview,
+            "preview_meta": preview_meta,
+        }
+        return self._cap_observation_result(observation)
+
+    def _preview_tool_result_value(self, value: Any) -> tuple[Any, dict[str, Any]]:
+        large_arrays: list[dict[str, Any]] = []
+        preview = self._preview_value(value, path="$", large_arrays=large_arrays, depth=0)
+        return preview, {
+            "large_arrays": large_arrays[:20],
+            "preview_chars": len(self._stable_json(preview)),
+            "array_sample_size": self.TOOL_RESULT_ARRAY_SAMPLE_SIZE,
+        }
+
+    def _preview_value(self, value: Any, *, path: str, large_arrays: list[dict[str, Any]], depth: int) -> Any:
+        if depth >= 6:
+            return self._preview_leaf(value)
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 30:
+                    result["..."] = f"{len(value) - index} more keys omitted"
+                    break
+                child_path = f"{path}.{key}" if path else str(key)
+                result[str(key)] = self._preview_value(item, path=child_path, large_arrays=large_arrays, depth=depth + 1)
+            return result
+        if isinstance(value, list):
+            if len(value) > self.TOOL_RESULT_ARRAY_SAMPLE_SIZE:
+                large_arrays.append(
+                    {
+                        "path": path,
+                        "count": len(value),
+                        "sample_count": self.TOOL_RESULT_ARRAY_SAMPLE_SIZE,
+                    }
+                )
+            sample = [
+                self._preview_value(item, path=f"{path}[{index}]", large_arrays=large_arrays, depth=depth + 1)
+                for index, item in enumerate(value[: self.TOOL_RESULT_ARRAY_SAMPLE_SIZE])
+            ]
+            if len(value) > self.TOOL_RESULT_ARRAY_SAMPLE_SIZE:
+                sample.append(f"... {len(value) - self.TOOL_RESULT_ARRAY_SAMPLE_SIZE} more items omitted")
+            return sample
+        return self._preview_leaf(value)
+
+    @staticmethod
+    def _preview_leaf(value: Any) -> Any:
+        if isinstance(value, str) and len(value) > 1_000:
+            return value[:1_000] + f"\n...[truncated string: kept 1000 of {len(value)} chars]..."
+        return value
+
+    def _cap_observation_result(self, observation: dict[str, Any]) -> dict[str, Any]:
+        rendered = self._stable_json(observation)
+        if len(rendered) <= self.TOOL_RESULT_OBSERVATION_MAX_CHARS:
+            return observation
+        capped = {
+            **observation,
+            "preview": self._stable_json(observation.get("preview"))[: self.TOOL_RESULT_PREVIEW_MAX_CHARS]
+            + "\n...[truncated preview]...",
+            "preview_meta": {
+                **dict(observation.get("preview_meta") or {}),
+                "observation_capped": True,
+                "observation_chars_before_cap": len(rendered),
+            },
+        }
+        if len(self._stable_json(capped)) <= self.TOOL_RESULT_OBSERVATION_MAX_CHARS:
+            return capped
+        capped["preview"] = "[preview omitted because the tool result shape is too large; use raw_ref with a narrow offset/limit.]"
+        return capped
+
+    @staticmethod
+    def _tool_result_ok_value(result: Any) -> bool:
+        if isinstance(result, dict) and isinstance(result.get("ok"), bool):
+            return bool(result["ok"])
+        return True
+
+    @staticmethod
+    def _stable_json(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except TypeError:
+            return json.dumps(str(value), ensure_ascii=False)
 
     def _build_completed_outcome(
         self,
@@ -1122,6 +1483,7 @@ class ToolCallingLoopHandler:
         prompt: str,
         generated,
         final_text: str,
+        response_contract: dict[str, Any] | None,
         tool_results: list[dict[str, Any]],
         operations: list[dict[str, Any]],
         llm_call_count: int,
@@ -1142,7 +1504,9 @@ class ToolCallingLoopHandler:
             "metadata": metadata,
             "tool_results": tool_results,
         }
-        work_disposition = self._work_disposition_from_tool_results(tool_results)
+        work_disposition = self._work_disposition_from_response_contract(response_contract)
+        if work_disposition is None:
+            work_disposition = self._parent_work_disposition_from_tool_results(tool_results)
         if work_disposition is not None:
             result_payload["workDisposition"] = work_disposition
         output_payload = {
@@ -1169,8 +1533,6 @@ class ToolCallingLoopHandler:
                 **dict(detail_json.get("agentDetail") or {}),
                 **session_agent_detail,
             }
-        observed_steps = self._observed_semantic_steps(tool_results)
-        step_summary = self._observed_step_summary(observed_steps)
         if resume_payload is not None:
             operations.append(
                 {
@@ -1192,8 +1554,8 @@ class ToolCallingLoopHandler:
             "output_payload": output_payload,
             "detail_json": detail_json,
             "todo_state": todo_state,
-            "observed_steps": observed_steps,
-            "summary_message": step_summary or final_text[:120] or "agent loop completed",
+            "observed_steps": [],
+            "summary_message": self._progress_summary(response_contract.get("progressUpdate")) or final_text[:120] or "agent loop completed",
             "operations": operations,
         }
         child_session = self._child_session_from_tool_results(tool_results)
@@ -1217,8 +1579,6 @@ class ToolCallingLoopHandler:
         """approval 대기 상태를 TaskRun/StepRun 저장 형식으로 만든다."""
 
         tool_names = [str(item["name"]) for item in tool_results]
-        observed_steps = self._observed_semantic_steps(tool_results)
-        step_summary = self._observed_step_summary(observed_steps)
         return {
             "task_status": TaskStatus.WAITING,
             "step_status": StepStatus.WAITING,
@@ -1236,8 +1596,8 @@ class ToolCallingLoopHandler:
                 todo_state=todo_state,
             ),
             "todo_state": todo_state,
-            "observed_steps": observed_steps,
-            "summary_message": step_summary or "approval required",
+            "observed_steps": [],
+            "summary_message": "approval required",
             "approval_payload": {
                 "reason": approval_reason,
                 "tool_results": tool_results,
@@ -1271,8 +1631,6 @@ class ToolCallingLoopHandler:
         max_iterations: int,
     ) -> dict[str, Any]:
         tool_names = [str(item["name"]) for item in tool_results]
-        observed_steps = self._observed_semantic_steps(tool_results)
-        step_summary = self._observed_step_summary(observed_steps)
         message = f"작업 반복 한도({max_iterations})에 도달했습니다."
         return {
             "task_status": TaskStatus.FAILED,
@@ -1295,8 +1653,8 @@ class ToolCallingLoopHandler:
                 todo_state=todo_state,
             ),
             "todo_state": todo_state,
-            "observed_steps": observed_steps,
-            "summary_message": step_summary or message,
+            "observed_steps": [],
+            "summary_message": message,
             "error_message": message,
             "operations": [
                 *operations,
@@ -1314,12 +1672,124 @@ class ToolCallingLoopHandler:
             ],
         }
 
+    def _build_circuit_blocked_outcome(
+        self,
+        *,
+        task_input: dict[str, Any],
+        generated: AgentModelResponse | None,
+        tool_results: list[dict[str, Any]],
+        operations: list[dict[str, Any]],
+        llm_call_count: int,
+        todo_state: dict[str, Any],
+        operation_counters: dict[str, int],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        tool_names = [str(item["name"]) for item in tool_results]
+        operation_error = self._tool_operation_error(result) or {
+            "code": "tool_failure_blocked",
+            "message": "반복 도구 실패가 차단되었습니다.",
+        }
+        failure_type = str(operation_error.get("type") or "")
+        code = "rate_limited_blocked" if failure_type == "rate_limited" else "tool_failure_blocked"
+        message = str(operation_error.get("message") or "반복 도구 실패가 차단되었습니다.")
+        result_error = {**operation_error, "code": code}
+        return {
+            "task_status": TaskStatus.FAILED,
+            "step_status": StepStatus.FAILED,
+            "result_payload": {
+                "text": generated.output_text if generated is not None and generated.output_text else message,
+                "tool_results": tool_results,
+                "error": result_error,
+            },
+            "output_payload": {
+                "tool_results": tool_results,
+            },
+            "detail_json": self._build_detail_json(
+                tool_names=tool_names,
+                llm_call_count=llm_call_count,
+                model_name=self._model_name(generated, task_input) if generated is not None else None,
+                todo_state=todo_state,
+            ),
+            "todo_state": todo_state,
+            "observed_steps": [],
+            "summary_message": message,
+            "error_message": message,
+            "operations": [
+                *operations,
+                {
+                    "key": self._next_operation_key(
+                        operation_counters,
+                        namespace="loop",
+                        base_key="tool_circuit",
+                    ),
+                    "title": "반복 도구 실패 차단",
+                    "kind": "system",
+                    "status": "failed",
+                    "summary": message,
+                    "error": result_error,
+                },
+            ],
+        }
+
+    def _build_provider_failure_outcome(
+        self,
+        *,
+        task_input: dict[str, Any],
+        prompt: str,
+        failure_payload: dict[str, Any],
+        tool_results: list[dict[str, Any]],
+        operations: list[dict[str, Any]],
+        llm_call_count: int,
+        todo_state: dict[str, Any],
+        operation_counters: dict[str, int],
+    ) -> dict[str, Any]:
+        message = str(failure_payload.get("message") or "모델 provider 호출이 실패했습니다.")
+        code = str(failure_payload.get("code") or "provider_call_failed")
+        return {
+            "task_status": TaskStatus.FAILED,
+            "step_status": StepStatus.FAILED,
+            "result_payload": {
+                "text": message,
+                "tool_results": tool_results,
+                "error": failure_payload,
+            },
+            "output_payload": {
+                "prompt": prompt,
+                "tool_results": tool_results,
+            },
+            "detail_json": self._build_detail_json(
+                tool_names=[str(item["name"]) for item in tool_results],
+                llm_call_count=llm_call_count,
+                model_name=None,
+                todo_state=todo_state,
+            ),
+            "todo_state": todo_state,
+            "observed_steps": [],
+            "summary_message": message,
+            "error_message": message,
+            "operations": [
+                *operations,
+                {
+                    "key": self._next_operation_key(
+                        operation_counters,
+                        namespace="provider",
+                        base_key=code,
+                    ),
+                    "title": "모델 provider 호출 실패",
+                    "kind": "llm",
+                    "status": "failed",
+                    "summary": message,
+                    "error": failure_payload,
+                },
+            ],
+        }
+
     @staticmethod
     def _requested_toolsets(task_input: dict[str, Any]) -> tuple[str, ...] | None:
         raw_toolsets = task_input.get("enabled_toolsets")
         if not isinstance(raw_toolsets, list):
             if ToolCallingLoopHandler._is_worker_payload(task_input):
-                return ("skills", "terminal", "file", "web", "browser")
+                return ("skills", "terminal", "file", "web")
             return None
         normalized = tuple(str(item).strip() for item in raw_toolsets if str(item).strip())
         if ToolCallingLoopHandler._is_worker_payload(task_input):
@@ -1330,7 +1800,7 @@ class ToolCallingLoopHandler:
                 for item in normalized
                 if item not in {"all", "*", "delegate", "delegation", "delegate_task"}
             )
-            return worker_toolsets or ("skills", "terminal", "file", "web", "browser")
+            return worker_toolsets or ("skills", "terminal", "file", "web")
         return normalized or None
 
     def _max_iterations(self, task_input: dict[str, Any]) -> int:
@@ -1396,25 +1866,47 @@ class ToolCallingLoopHandler:
         return None
 
     @classmethod
-    def _observed_semantic_steps(cls, tool_results: list[dict[str, Any]]) -> list[dict[str, str]]:
-        observed: list[dict[str, str]] = []
-        for tool_result in tool_results:
-            if str(tool_result.get("name") or "") != "step":
-                continue
-            result = tool_result.get("result")
-            if not isinstance(result, dict) or result.get("ok") is False:
-                continue
-            raw_steps = result.get("steps")
-            if not isinstance(raw_steps, list):
-                continue
-            observed = [
-                normalized
-                for index, item in enumerate(raw_steps[:12])
-                if isinstance(item, dict)
-                for normalized in [cls._normalize_observed_step(item, index=index)]
-                if normalized is not None
-            ]
-        return observed
+    def _response_contract_from_model_response(cls, generated: AgentModelResponse) -> dict[str, Any]:
+        contract = parse_assistant_response_contract(generated.output_text)
+        if isinstance(generated.progress_update, dict):
+            contract["progressUpdate"] = generated.progress_update
+        if isinstance(generated.work_disposition, dict):
+            contract["workDisposition"] = generated.work_disposition
+        if isinstance(generated.visible_text, str) and generated.visible_text.strip():
+            contract["text"] = generated.visible_text.strip()
+        return contract
+
+    @staticmethod
+    async def _emit_model_progress_update(
+        *,
+        progress_sink,
+        progress_update: dict[str, Any],
+        turn_index: int,
+        generated: AgentModelResponse,
+    ) -> None:
+        if progress_sink is None:
+            return
+        payload = {
+            "progressUpdate": dict(progress_update),
+            "turn": turn_index,
+            "model": generated.model,
+            "responseId": (generated.metadata or {}).get("response_id"),
+        }
+        await progress_sink(
+            event_type="model.progress.updated",
+            summary_message=ToolCallingLoopHandler._progress_summary(progress_update),
+            payload=payload,
+        )
+
+    @staticmethod
+    def _progress_summary(progress_update: Any) -> str | None:
+        if not isinstance(progress_update, dict):
+            return None
+        for key in ("summary", "message", "statusMessage", "title", "step"):
+            value = progress_update.get(key)
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())[:120]
+        return None
 
     @staticmethod
     def _child_session_from_tool_results(tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1430,13 +1922,21 @@ class ToolCallingLoopHandler:
         return None
 
     @staticmethod
-    def _work_disposition_from_tool_results(tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for item in reversed(tool_results):
-            if str(item.get("name") or "") != "work_disposition":
-                continue
-            result = item.get("result")
-            if isinstance(result, dict) and isinstance(result.get("workDisposition"), dict):
-                return dict(result["workDisposition"])
+    def _work_disposition_from_response_contract(response_contract: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(response_contract, dict):
+            return None
+        disposition = response_contract.get("workDisposition")
+        if not isinstance(disposition, dict):
+            return None
+        status = str(disposition.get("status") or "").strip()
+        if status not in {"todo", "in_progress", "in_review", "blocked", "done", "cancelled"}:
+            return None
+        normalized = dict(disposition)
+        normalized["status"] = status
+        return normalized
+
+    @staticmethod
+    def _parent_work_disposition_from_tool_results(tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
         for item in reversed(tool_results):
             if str(item.get("name") or "") != "session_agent_task":
                 continue
@@ -1511,39 +2011,6 @@ class ToolCallingLoopHandler:
             "summary": latest.get("summary"),
             "sessionAgents": session_agents,
         }
-
-    @staticmethod
-    def _normalize_observed_step(item: dict[str, Any], *, index: int) -> dict[str, str] | None:
-        title = str(item.get("title") or item.get("summary") or "").strip()
-        if not title:
-            return None
-        step_id = str(item.get("id") or f"step-{index + 1}").strip() or f"step-{index + 1}"
-        summary = str(item.get("summary") or title).strip()
-        goal = str(item.get("goal") or summary or title).strip()
-        status = str(item.get("status") or "pending").strip().lower()
-        if status not in {"pending", "in_progress", "completed", "cancelled"}:
-            status = "pending"
-        return {
-            "id": step_id,
-            "title": title,
-            "summary": summary or title,
-            "goal": goal or summary or title,
-            "status": status,
-        }
-
-    @staticmethod
-    def _observed_step_summary(observed_steps: list[dict[str, str]]) -> str | None:
-        if not observed_steps:
-            return None
-        active = next(
-            (
-                step
-                for step in observed_steps
-                if step.get("status") in {"in_progress", "pending"}
-            ),
-            observed_steps[-1],
-        )
-        return active.get("summary") or active.get("title")
 
     @staticmethod
     def _build_detail_json(

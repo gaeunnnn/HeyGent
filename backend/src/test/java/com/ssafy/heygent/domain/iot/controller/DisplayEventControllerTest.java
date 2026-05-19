@@ -74,7 +74,7 @@ class DisplayEventControllerTest {
             12L
         );
         DisplayPublishResult response = DisplayPublishResult.published(
-            "devices/deskmate-c3-a1b2c3/display",
+            "devices/heygent-c3-a1b2c3/display",
             0,
             payload
         );
@@ -93,7 +93,7 @@ class DisplayEventControllerTest {
                 .content(objectMapper.writeValueAsString(request())))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data.published").value(true))
-            .andExpect(jsonPath("$.data.topic").value("devices/deskmate-c3-a1b2c3/display"));
+            .andExpect(jsonPath("$.data.topic").value("devices/heygent-c3-a1b2c3/display"));
 
         verify(displayEventPublishService).publish(
             eq(USER_ID),

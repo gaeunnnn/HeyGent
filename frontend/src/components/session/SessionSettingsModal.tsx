@@ -213,7 +213,7 @@ function SessionSettingsForm({ session, onOpenChange }: SessionSettingsFormProps
             <div className="relative shrink-0">
               <div className="border-border flex h-14 w-14 overflow-hidden rounded-full border-2 sm:h-20 sm:w-20">
                 <img
-                  src="/assets/agents/ceo/ceo_profile.png"
+                  src="/assets/agents/ceo/ceo_profile_img.png"
                   alt="에이전트 프로필"
                   className="h-full w-full object-cover"
                 />
@@ -368,14 +368,6 @@ function SessionSettingsForm({ session, onOpenChange }: SessionSettingsFormProps
         <div className="grid shrink-0 grid-cols-2 gap-2 md:flex">
           <button
             type="button"
-            onClick={handleClose}
-            disabled={saving}
-            className="bg-muted text-foreground hover:bg-muted/80 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
-          >
-            취소
-          </button>
-          <button
-            type="button"
             onClick={() => void handleSave()}
             disabled={saving}
             className="bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
@@ -386,6 +378,14 @@ function SessionSettingsForm({ session, onOpenChange }: SessionSettingsFormProps
               <Sparkles className="h-3.5 w-3.5" />
             )}
             저장
+          </button>
+          <button
+            type="button"
+            onClick={handleClose}
+            disabled={saving}
+            className="bg-muted text-foreground hover:bg-muted/80 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            취소
           </button>
         </div>
       </div>

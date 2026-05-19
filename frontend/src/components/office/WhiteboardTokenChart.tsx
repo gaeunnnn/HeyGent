@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { CommandUsageSummary } from '@/apis/aiCommandUsage'
 
 // 화이트보드 4 모서리 좌표 (맵 픽셀 공간, 1600×900 기준)
@@ -36,6 +37,7 @@ interface WhiteboardTokenChartProps {
 }
 
 export function WhiteboardTokenChart({ summary, onOpen }: WhiteboardTokenChartProps) {
+  const [hovered, setHovered] = useState(false)
   const maxVal = summary
     ? Math.max(
         summary.inputTokens,
@@ -46,17 +48,27 @@ export function WhiteboardTokenChart({ summary, onOpen }: WhiteboardTokenChartPr
       )
     : 1
 
+  const isInteractive = !!onOpen
+
   return (
     <div
       style={{
         position: 'absolute',
         inset: 0,
         clipPath: CLIP,
-        pointerEvents: onOpen ? 'auto' : 'none',
-        cursor: onOpen ? 'pointer' : 'default',
+        pointerEvents: isInteractive ? 'auto' : 'none',
+        cursor: isInteractive ? 'pointer' : 'default',
         zIndex: 5,
+        // 호버 시 화이트보드 자체가 따뜻하게 빛난다 — 클릭 가능하다는 단서.
+        background: hovered ? 'rgba(255, 240, 180, 0.45)' : 'transparent',
+        boxShadow: hovered
+          ? 'inset 0 0 60px rgba(255, 220, 110, 0.7), 0 0 24px rgba(255, 220, 110, 0.4)'
+          : 'none',
+        transition: 'background 0.2s ease, box-shadow 0.2s ease',
       }}
       onClick={onOpen}
+      onMouseEnter={() => isInteractive && setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       <div
         style={{

@@ -1,8 +1,10 @@
 import { useEffect, useRef } from 'react'
-import { listSessionAgents, getSessionMainAgent, deriveSpriteId } from '@/apis/agents'
+import { deriveSpriteId } from '@/apis/agents'
 import type { AgentActivityStatus, TaskStatus, VisualizationTask } from '@/components/office/types'
+import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import { useAgentVisualizationStore } from '@/store/useAgentVisualizationStore'
 import { useTaskRunStore } from '@/store/useTaskRunStore'
+import type { AgentPanelItem } from '@/store/useSessionStore'
 import type { RawStepRun, RawTaskRun } from '@/types/taskRuns'
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'CANCELLED'])
@@ -65,10 +67,8 @@ function resolveTaskRunSpriteId(
   const actorAgent = taskRun.displayContext?.actorAgent
   if (!actorAgent) return null
   if (actorAgent.kind === 'main') return 'ceo'
-  const mappedKey = actorAgent.profileId ?? actorAgent.id
-  const fromMap = mappedKey != null ? profileIdMap?.[mappedKey] : undefined
-  if (fromMap) return fromMap
-  return actorAgent.profileKey ?? null
+  if (actorAgent.profileId != null) return profileIdMap?.[actorAgent.profileId] ?? null
+  return null
 }
 
 function resolveSessionTaskRunSpriteId(
@@ -165,7 +165,11 @@ type CachedSubAgentProfile = {
   profileImage?: string
 }
 
-export function useAgentInfoSync(sessionId?: string, profileIdMap?: Record<string, string>) {
+export function useAgentInfoSync(
+  sessionId?: string,
+  profileIdMap?: Record<string, string>,
+  agentPanels?: AgentPanelItem[],
+) {
   const taskRunsById = useTaskRunStore((s) => s.taskRunsById)
   const stepRunsById = useTaskRunStore((s) => s.stepRunsById)
   const fetchSessionTaskRuns = useTaskRunStore((s) => s.fetchSessionTaskRuns)
@@ -198,7 +202,9 @@ export function useAgentInfoSync(sessionId?: string, profileIdMap?: Record<strin
       if (fetchedSessionIds.current.has(currentSessionId)) continue
       fetchedSessionIds.current.add(currentSessionId)
 
-      void listSessionAgents(currentSessionId)
+      void useAgentCacheStore
+        .getState()
+        .fetchSessionAgents(currentSessionId)
         .then((profiles) => {
           for (const profile of profiles) {
             const profileData: CachedSubAgentProfile = {
@@ -209,15 +215,19 @@ export function useAgentInfoSync(sessionId?: string, profileIdMap?: Record<strin
             }
             // profileId 기준으로 캐시 — profileIdMap이 나중에 도착해도 재매핑 가능
             cachedProfilesRef.current.set(profile.profileId, profileData)
-            // profileIdMap에서 즉시 spriteId를 찾거나 deriveSpriteId 폴백을 사용한다.
+            // visualKey → profileIdMap → deriveSpriteId 순서로 spriteId를 결정한다.
             const spriteId =
-              profileIdMapRef.current?.[profile.profileId] ?? deriveSpriteId(profile.profileImage)
+              profile.visualKey ??
+              profileIdMapRef.current?.[profile.profileId] ??
+              deriveSpriteId(profile.profileImage)
             if (spriteId) updateAgentInfo(spriteId, profileData)
           }
         })
         .catch(() => {})
 
-      void getSessionMainAgent(currentSessionId)
+      void useAgentCacheStore
+        .getState()
+        .fetchSessionMainAgent(currentSessionId)
         .then((profile) => {
           const profileData = {
             name: '팀장',
@@ -237,14 +247,27 @@ export function useAgentInfoSync(sessionId?: string, profileIdMap?: Record<strin
     }
   }, [fetchSessionTaskRuns, sessionId, taskRunsById, updateAgentInfo])
 
-  // profileIdMap이 늦게 채워지면 캐시된 프로필 데이터를 올바른 spriteId로 재매핑한다.
+  // profileIdMap이 늦게 채워지거나 agentPanels(이름·역할 등)가 바뀌면 agentInfoMap을 갱신한다.
+  // agentPanels의 최신 값을 캐시 데이터보다 우선 적용해 사이드바 수정이 즉시 반영되도록 한다.
   useEffect(() => {
     if (!profileIdMap) return
     for (const [profileId, spriteId] of Object.entries(profileIdMap)) {
-      const profileData = cachedProfilesRef.current.get(profileId)
-      if (profileData) updateAgentInfo(spriteId, profileData)
+      const cachedData = cachedProfilesRef.current.get(profileId)
+      if (!cachedData) continue
+      const panel = agentPanels?.find((p) => p.agent.profileId === profileId)
+      const profileData: typeof cachedData = panel
+        ? {
+            ...cachedData,
+            name: panel.agent.name,
+            role: panel.agent.role ?? cachedData.role,
+            ...(panel.agent.profileImage !== undefined
+              ? { profileImage: panel.agent.profileImage ?? undefined }
+              : {}),
+          }
+        : cachedData
+      updateAgentInfo(spriteId, profileData)
     }
-  }, [profileIdMap, updateAgentInfo])
+  }, [profileIdMap, updateAgentInfo, agentPanels])
 
   useEffect(() => {
     const updatesBySpriteId = new Map<
