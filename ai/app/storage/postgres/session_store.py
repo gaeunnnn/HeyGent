@@ -106,6 +106,7 @@ class PostgresSessionStore:
         offset: int = 0,
         include_archived: bool = False,
         include_deleted: bool = False,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
         connection = self.connection_factory()
         sql = "SELECT * FROM agent_sessions"
@@ -121,12 +122,45 @@ class PostgresSessionStore:
             owner_sql, owner_params = _owner_filter(effective_owner)
             where.append(owner_sql)
             params_list.extend(owner_params)
+        if source is not None:
+            where.append("COALESCE(session_source, metadata->>'source') = %s")
+            params_list.append(source)
         if where:
             sql += " WHERE " + " AND ".join(where)
         params = tuple([*params_list, limit, offset])
         sql += " ORDER BY updated_at DESC, created_at DESC LIMIT %s OFFSET %s"
         rows = connection.execute(sql, params).fetchall()
         return [record for row in rows if (record := _session_from_row(row)) is not None]
+
+    def count_sessions(
+        self,
+        owner: str | None = None,
+        *,
+        user_id: str | None = None,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        source: str | None = None,
+    ) -> int:
+        connection = self.connection_factory()
+        sql = "SELECT COUNT(*) AS count FROM agent_sessions"
+        effective_owner = owner if owner is not None else user_id
+        where: list[str] = []
+        if not include_deleted:
+            where.append("deleted_at IS NULL")
+        if not include_archived:
+            where.append("archived_at IS NULL")
+        params_list: list[Any] = []
+        if effective_owner is not None:
+            owner_sql, owner_params = _owner_filter(effective_owner)
+            where.append(owner_sql)
+            params_list.extend(owner_params)
+        if source is not None:
+            where.append("COALESCE(session_source, metadata->>'source') = %s")
+            params_list.append(source)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        row = connection.execute(sql, tuple(params_list)).fetchone()
+        return int((row or {}).get("count") or 0)
 
     def get_latest_session_by_key(self, session_key: str, *, owner: str | None = None) -> dict[str, Any] | None:
         connection = self.connection_factory()

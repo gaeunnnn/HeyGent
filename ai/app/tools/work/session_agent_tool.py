@@ -30,6 +30,14 @@ SESSION_AGENT_TASK_SCHEMA = {
                 "type": "string",
                 "description": "Optional agent name, role, or capability hint used when assigneeAgentId is omitted.",
             },
+            "childWorkId": {
+                "type": "string",
+                "description": "Existing child work id to execute when workflowExecution.mode is strict_reuse_children.",
+            },
+            "workflowSlotKey": {
+                "type": "string",
+                "description": "Workflow slot key that maps to an existing child work in strict workflow execution.",
+            },
             "description": {
                 "type": "string",
                 "description": "Optional detailed child work description.",

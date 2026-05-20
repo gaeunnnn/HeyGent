@@ -29,6 +29,7 @@ async function compileUtilityModules() {
       'src/utils/taskRunDisplayStatus.ts',
       'src/utils/taskRunHydration.ts',
       'src/utils/chatLiveState.ts',
+      'src/utils/agentCurrentTask.ts',
     ],
     { cwd: rootDir, stdio: 'pipe' },
   )
@@ -215,4 +216,86 @@ test('latest completed assistant message clears stale running session even witho
     ),
     true,
   )
+})
+
+test('agent speech bubble keeps previous step title while task is still running between step events', async () => {
+  const { pickCurrentVisualizationTask } = await importCompiledModule('agentCurrentTask.js')
+
+  const currentTask = pickCurrentVisualizationTask({
+    taskRun: { task_run_id: 'task-1', status: 'RUNNING', title: '삼성 조사' },
+    stepRuns: [
+      {
+        step_run_id: 'step-1',
+        task_run_id: 'task-1',
+        status: 'COMPLETED',
+        title: '삼성 최신 동향 조사',
+      },
+    ],
+    previousCurrentTask: {
+      taskId: 'step-1',
+      title: '삼성 최신 동향 조사',
+      description: '',
+      status: 'in_progress',
+    },
+  })
+
+  assert.equal(currentTask.title, '삼성 최신 동향 조사')
+  assert.equal(currentTask.taskId, 'step-1')
+})
+
+test('agent speech bubble switches to next active step title when next step starts', async () => {
+  const { pickCurrentVisualizationTask } = await importCompiledModule('agentCurrentTask.js')
+
+  const currentTask = pickCurrentVisualizationTask({
+    taskRun: { task_run_id: 'task-1', status: 'RUNNING', title: '삼성 조사' },
+    stepRuns: [
+      {
+        step_run_id: 'step-1',
+        task_run_id: 'task-1',
+        status: 'COMPLETED',
+        title: '삼성 최신 동향 조사',
+        step_order: 1,
+      },
+      {
+        step_run_id: 'step-2',
+        task_run_id: 'task-1',
+        status: 'RUNNING',
+        title: '화면 구성 정리',
+        step_order: 2,
+      },
+    ],
+    previousCurrentTask: {
+      taskId: 'step-1',
+      title: '삼성 최신 동향 조사',
+      description: '',
+      status: 'in_progress',
+    },
+  })
+
+  assert.equal(currentTask.title, '화면 구성 정리')
+  assert.equal(currentTask.taskId, 'step-2')
+})
+
+test('agent speech bubble clears only when the task run is terminal', async () => {
+  const { pickCurrentVisualizationTask } = await importCompiledModule('agentCurrentTask.js')
+
+  const currentTask = pickCurrentVisualizationTask({
+    taskRun: { task_run_id: 'task-1', status: 'COMPLETED', title: '삼성 조사' },
+    stepRuns: [
+      {
+        step_run_id: 'step-1',
+        task_run_id: 'task-1',
+        status: 'COMPLETED',
+        title: '삼성 최신 동향 조사',
+      },
+    ],
+    previousCurrentTask: {
+      taskId: 'step-1',
+      title: '삼성 최신 동향 조사',
+      description: '',
+      status: 'in_progress',
+    },
+  })
+
+  assert.equal(currentTask, undefined)
 })

@@ -38,8 +38,23 @@ class TranscriptStore(Protocol):
         user_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
         """owner 범위의 transcript/session 목록을 최근 업데이트 순서로 조회한다."""
+        ...
+
+    def count_sessions(
+        self,
+        owner: str | None = None,
+        *,
+        user_id: str | None = None,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        source: str | None = None,
+    ) -> int:
+        """조건에 맞는 transcript/session 개수를 조회한다."""
         ...
 
     def get_latest_session_by_key(self, session_key: str, *, owner: str | None = None) -> dict[str, Any] | None:

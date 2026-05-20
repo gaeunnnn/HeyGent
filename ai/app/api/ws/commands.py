@@ -226,34 +226,32 @@ class WebSocketCommandRouter:
         include_archived = bool(payload.get("includeArchived", payload.get("include_archived", False)))
         offset = (page - 1) * page_size
         session_store = context.websocket.app.state.session_store
-        # 사용자별 세션은 최대 10개 보장 (제품 정책) — limit 을 작게 잡아 DB·메모리·정렬 비용 모두 절감.
-        sessions = [
-            session
-            for session in session_store.list_sessions(
-                user_id=context.auth.user_id,
-                limit=10,
-                offset=0,
-                include_archived=include_archived,
-            )
-            if _is_public_session(session)
-        ]
-        sessions.sort(
-            key=lambda session: (
-                session.get("updated_at") or session.get("started_at"),
-                session.get("archived_at") is not None,
-            ),
-            reverse=True,
+        sessions = session_store.list_sessions(
+            user_id=context.auth.user_id,
+            limit=page_size,
+            offset=offset,
+            include_archived=include_archived,
+            source=_PUBLIC_SESSION_SOURCE,
         )
-        selected = sessions[offset : offset + page_size]
+        selected = [session for session in sessions if _is_public_session(session)]
+        total_count = (
+            session_store.count_sessions(
+                user_id=context.auth.user_id,
+                include_archived=include_archived,
+                source=_PUBLIC_SESSION_SOURCE,
+            )
+            if hasattr(session_store, "count_sessions")
+            else offset + len(selected)
+        )
         return (
             "session.list.result",
             {
                 "items": [_public_session_payload(session, context=context) for session in selected],
                 "page": page,
                 "page_size": page_size,
-                "total_count": len(sessions),
+                "total_count": total_count,
                 "has_previous": page > 1,
-                "has_next": offset + len(selected) < len(sessions),
+                "has_next": offset + len(selected) < total_count,
             },
         )
 

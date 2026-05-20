@@ -36,6 +36,21 @@ export type WorkflowTemplateListResponse = {
   totalCount: number
 }
 
+export type WorkflowTemplateInstantiateChild = {
+  slotKey: string
+  workId: string
+  identifier: string
+  title: string
+  assigneeAgentId: string | null
+}
+
+export type WorkflowTemplateInstantiateResponse = {
+  rootWorkId: string
+  childWorkIds: string[]
+  childrenBySlotKey: Record<string, string>
+  children: WorkflowTemplateInstantiateChild[]
+}
+
 function basePath(sessionId: string): string {
   return `/sessions/${encodeURIComponent(sessionId)}/workflow-templates`
 }
@@ -92,8 +107,8 @@ export async function deleteWorkflowTemplate(sessionId: string, templateId: stri
 export async function instantiateWorkflowTemplate(
   sessionId: string,
   templateId: string,
-): Promise<{ workIds: string[] }> {
-  const { data } = await aiAxiosInstance.post<{ workIds: string[] }>(
+): Promise<WorkflowTemplateInstantiateResponse> {
+  const { data } = await aiAxiosInstance.post<WorkflowTemplateInstantiateResponse>(
     `${basePath(sessionId)}/${encodeURIComponent(templateId)}/instantiate`,
     {},
   )

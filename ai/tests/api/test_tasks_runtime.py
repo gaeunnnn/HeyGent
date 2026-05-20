@@ -464,7 +464,9 @@ def test_step_events_use_model_progress_title_as_realtime_summary(client, monkey
     step_started = [event for event in events if event.event_type == "step.started"]
     event_types = [event.event_type for event in events]
 
-    assert [event.summary_message for event in step_created] == ["agent loop 실행 중"]
+    assert [event.summary_message for event in step_created] == [
+        "관련 자료를 조사하고 파일 초안을 작성해줘. 중"
+    ]
     step_updated = next(event for event in events if event.event_type == "step.updated" and event.payload.get("reason") == "model.progress")
     assert step_updated.summary_message == "이승엽 기록 근거 확인 중"
     assert event_types.index("step.created") < event_types.index("step.updated")
@@ -595,8 +597,12 @@ def test_agent_loop_updates_same_runtime_steprun_when_model_progress_changes(cli
         for index, event in enumerate(events)
         if event.event_type == "tool.started" and event.payload.get("tool_name") == "write_file"
     )
-    assert [event.payload["step_title"] for event in step_created_events] == ["agent loop 실행"]
-    assert [event.payload["step_title"] for event in step_started_events] == ["agent loop 실행"]
+    assert [event.payload["step_title"] for event in step_created_events] == [
+        "이승엽 정보를 조사하고 tmp/testfile/lee.md 파일로 작성해줘."
+    ]
+    assert [event.payload["step_title"] for event in step_started_events] == [
+        "이승엽 정보를 조사하고 tmp/testfile/lee.md 파일로 작성해줘."
+    ]
     assert todo_started_index < write_started_index
 
     write_events = [
@@ -1868,5 +1874,5 @@ def test_taskruns_flow_returns_observed_step_node(client, monkeypatch):
     flow = flow_response.json()
     assert "nodes" in flow
     assert len(flow["nodes"]) == 1
-    assert flow["nodes"][0]["title"] == "agent loop 실행"
+    assert flow["nodes"][0]["title"] == "흐름 확인"
     assert "현재 연결은 정상" in flow["summary"]
