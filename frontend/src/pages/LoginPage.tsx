@@ -1,8 +1,3 @@
-import { useNavigate } from 'react-router'
-import { devLogin } from '@/apis/auth'
-import { saveOpenAiApiKey } from '@/apis/openaiApiKey'
-import { getMyInfo } from '@/apis/users'
-import { useAuthStore } from '@/store/useAuthStore'
 import { useEffect, useRef, useCallback, useState } from 'react'
 
 // 로그인 페이지는 항상 라이트 모드로 표시
@@ -25,8 +20,6 @@ const KAKAO_AUTH_URL =
   `?client_id=${import.meta.env.VITE_KAKAO_CLIENT_ID}` +
   `&redirect_uri=${import.meta.env.VITE_KAKAO_REDIRECT_URI}` +
   `&response_type=code`
-const DEV_OPENAI_API_KEY = import.meta.env.VITE_DEV_OPENAI_API_KEY?.trim()
-
 // ─── 클러스터 정의 ───────────────────────────────────────────
 
 interface ClusterDef {
@@ -1379,54 +1372,14 @@ function KakaoIcon() {
 
 export function LoginPage() {
   useLightModeForLogin()
-  const navigate = useNavigate()
-  const { setTokens, setUserInfo } = useAuthStore()
   const [hoveredCluster, setHoveredCluster] = useState<number | null>(null)
   const [scrollProgress, setScrollProgress] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bgPhraseRef = useRef<HTMLDivElement>(null)
   const bgPhraseWordRefs = useRef<Record<string, HTMLSpanElement | null>>({})
   const phraseTiltFrameRef = useRef<number | null>(null)
-  const [devLoginLoading, setDevLoginLoading] = useState(false)
-  const [devLoginError, setDevLoginError] = useState<string | null>(null)
-
   const handleKakaoLogin = () => {
     window.location.href = KAKAO_AUTH_URL
-  }
-
-  const handleDevLogin = async () => {
-    if (devLoginLoading) return
-    setDevLoginLoading(true)
-    setDevLoginError(null)
-    try {
-      const res = await devLogin()
-      setTokens(res.data.accessToken, res.data.refreshToken)
-      await saveDevOpenAiApiKey()
-      try {
-        const userRes = await getMyInfo()
-        setUserInfo(userRes.data)
-      } catch {
-        /* ignore */
-      }
-      navigate('/', { replace: true })
-    } catch (err) {
-      setDevLoginError(
-        err instanceof Error
-          ? err.message
-          : '서버에 연결할 수 없습니다. 백엔드가 실행 중인지 확인하세요.',
-      )
-    } finally {
-      setDevLoginLoading(false)
-    }
-  }
-
-  const saveDevOpenAiApiKey = async () => {
-    if (!DEV_OPENAI_API_KEY) return
-    try {
-      await saveOpenAiApiKey('openai_api_key', { apiKey: DEV_OPENAI_API_KEY })
-    } catch (error) {
-      console.warn('개발용 API key 자동 저장에 실패했습니다.', error)
-    }
   }
 
   useEffect(() => {
@@ -1856,59 +1809,6 @@ export function LoginPage() {
             <KakaoIcon />
             카카오 계정으로 로그인
           </button>
-
-          {import.meta.env.DEV && (
-            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <button
-                onClick={handleDevLogin}
-                disabled={devLoginLoading}
-                style={{
-                  width: '100%',
-                  background: 'rgba(255,255,255,0.04)',
-                  border: '1px solid rgba(210,210,214,0.16)',
-                  color: devLoginLoading ? 'rgba(190,190,194,0.40)' : 'rgba(190,190,194,0.66)',
-                  borderRadius: 10,
-                  padding: '10px 24px',
-                  fontSize: 12,
-                  fontWeight: 500,
-                  cursor: devLoginLoading ? 'not-allowed' : 'pointer',
-                  fontFamily:
-                    '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif',
-                  transition: 'border-color 0.15s, color 0.15s, background 0.15s',
-                }}
-                onMouseEnter={(e) => {
-                  if (devLoginLoading) return
-                  e.currentTarget.style.borderColor = 'rgba(210,210,214,0.34)'
-                  e.currentTarget.style.color = 'rgba(220,220,224,0.90)'
-                  e.currentTarget.style.background = 'rgba(255,255,255,0.06)'
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = 'rgba(210,210,214,0.16)'
-                  e.currentTarget.style.color = devLoginLoading
-                    ? 'rgba(190,190,194,0.40)'
-                    : 'rgba(190,190,194,0.66)'
-                  e.currentTarget.style.background = 'rgba(255,255,255,0.04)'
-                }}
-              >
-                {devLoginLoading ? '로그인 중...' : '개발용 테스트 로그인'}
-              </button>
-              {devLoginError && (
-                <p
-                  style={{
-                    margin: 0,
-                    fontSize: 11,
-                    color: 'rgba(255,100,100,0.85)',
-                    textAlign: 'center',
-                    fontFamily:
-                      '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif',
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {devLoginError}
-                </p>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Scroll hint */}

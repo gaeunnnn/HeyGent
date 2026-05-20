@@ -96,10 +96,14 @@ function pickCurrentTask(
     .sort((a, b) => (b.step_order ?? b.stepOrder ?? 0) - (a.step_order ?? a.stepOrder ?? 0))[0]
 
   if (activeStep) {
+    const stepGoal = getStepRunGoal(activeStep)
+    const isGenericTitle =
+      !activeStep.title || activeStep.title.toLowerCase().includes('agent loop')
+    const title = isGenericTitle ? stepGoal || taskRun.title || '작업 진행 중' : activeStep.title
     return {
       taskId: activeStep.step_run_id,
-      title: activeStep.title ?? taskRun.title ?? '작업 진행 중',
-      description: getStepRunGoal(activeStep),
+      title,
+      description: stepGoal,
       status: 'in_progress',
       startedAt: activeStep.started_at ?? undefined,
     }

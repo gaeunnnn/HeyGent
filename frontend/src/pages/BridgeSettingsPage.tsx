@@ -127,6 +127,11 @@ export function BridgeSettingsPage() {
               사용자 PC 에서 도구(터미널·파일)를 실행하려면 이 페이지에서 페어링한 PC 가 켜져 있어야
               해요.
             </p>
+            <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+              🔒 브릿지가 받은 도구 호출은 사용자 PC 의 워크스페이스 폴더 안에서만 실행됩니다. 토큰
+              같은 민감 데이터를 다루는 본체와, 임의 명령을 실행하는 워커가 별도 프로세스로 분리되어
+              있어 권한이 최소화됩니다.
+            </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <a

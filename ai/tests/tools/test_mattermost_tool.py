@@ -3,6 +3,9 @@ import json
 from app.tools.messaging import mattermost_tool
 
 
+MATTERMOST_MESSAGE_HEADER = "# :ai: HeyGent에서 온 메시지 입니다 :ai:"
+
+
 class FakeResponse:
     def __enter__(self):
         return self
@@ -35,3 +38,25 @@ def test_mattermost_tool_uses_backend_tool_timeout(monkeypatch):
     assert result["ok"] is True
     assert captured["timeout"] == 9.5
     assert captured["body"]["target"] == "우리만"
+    assert captured["body"]["message"] == f"{MATTERMOST_MESSAGE_HEADER}\n\n테스트 메시지"
+
+
+def test_mattermost_tool_does_not_duplicate_header(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setenv("HEYGENT_INTERNAL_SERVICE_TOKEN", "internal-token")
+    monkeypatch.setattr(mattermost_tool, "urlopen", fake_urlopen)
+
+    result = mattermost_tool.send_mattermost_message_handler(
+        {
+            "_trusted_user_id": 1,
+            "message": f"{MATTERMOST_MESSAGE_HEADER}\n\n이미 헤더가 있는 메시지",
+        }
+    )
+
+    assert result["ok"] is True
+    assert captured["body"]["message"] == f"{MATTERMOST_MESSAGE_HEADER}\n\n이미 헤더가 있는 메시지"
