@@ -26,7 +26,6 @@ import type { BoardAssignee } from './issueBoardPanelTypes'
 import {
   createWorkflowTemplate,
   deleteWorkflowTemplate,
-  instantiateWorkflowTemplate,
   listWorkflowTemplates,
   updateWorkflowTemplate,
   type WorkflowTemplate,
@@ -34,17 +33,8 @@ import {
   type WorkflowTemplateNode as ApiTplNode,
 } from '@/apis/workflowTemplates'
 import { useChatStore } from '@/store/useChatStore'
-import { buildWorkflowRunInputPayload, buildWorkflowRunTrigger } from '@/utils/workflowRunPayload'
-
-type AgentChoice = {
-  assigneeAgentId: string | null
-  defaultTitle: string
-  id: string
-  imageUrl?: string | null
-  name: string
-  provided?: boolean
-  templateKey?: string
-}
+import { buildWorkflowAgentChoices, type WorkflowAgentChoice } from './workflowAgentChoices'
+import { runWorkflowTemplate } from './workflowTemplateRunner'
 
 const CEO_PROFILE_IMAGE = '/assets/agents/ceo/ceo_profile_img.png'
 
@@ -100,22 +90,13 @@ function newSlotKey(): string {
 export function WorkflowTemplateEditor({
   assignees,
   sessionId,
-  onEnsureDefaultAgents,
-  onEnsureProvidedAgent,
 }: {
   assignees: BoardAssignee[]
   sessionId: string
-  onEnsureDefaultAgents: () => Promise<BoardAssignee[]>
-  onEnsureProvidedAgent: (templateKey: string) => Promise<BoardAssignee[]>
 }) {
   return (
     <ReactFlowProvider>
-      <WorkflowTemplateEditorInner
-        assignees={assignees}
-        sessionId={sessionId}
-        onEnsureDefaultAgents={onEnsureDefaultAgents}
-        onEnsureProvidedAgent={onEnsureProvidedAgent}
-      />
+      <WorkflowTemplateEditorInner assignees={assignees} sessionId={sessionId} />
     </ReactFlowProvider>
   )
 }
@@ -123,13 +104,9 @@ export function WorkflowTemplateEditor({
 function WorkflowTemplateEditorInner({
   assignees,
   sessionId,
-  onEnsureDefaultAgents,
-  onEnsureProvidedAgent,
 }: {
   assignees: BoardAssignee[]
   sessionId: string
-  onEnsureDefaultAgents: () => Promise<BoardAssignee[]>
-  onEnsureProvidedAgent: (templateKey: string) => Promise<BoardAssignee[]>
 }) {
   // ── 템플릿 목록 ──
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([])
@@ -162,10 +139,10 @@ function WorkflowTemplateEditorInner({
 
   // 작업 추가 모달
   const [composerOpen, setComposerOpen] = useState(false)
-  const [composerAgent, setComposerAgent] = useState<AgentChoice | null>(null)
+  const [composerAgent, setComposerAgent] = useState<WorkflowAgentChoice | null>(null)
   const [composerTitle, setComposerTitle] = useState('')
   const [composerDescription, setComposerDescription] = useState('')
-  const [composerAgentBusy, setComposerAgentBusy] = useState(false)
+  const composerAgentBusy = false
   const [editingSlot, setEditingSlot] = useState<string | null>(null) // 노드 수정
 
   // 저장/실행
@@ -217,22 +194,8 @@ function WorkflowTemplateEditorInner({
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
   // ── agent picker 목록 ──
-  const agentChoices = useMemo<AgentChoice[]>(
-    () => [
-      ...assignees
-        .filter((assignee) => assignee.id !== 'CEO')
-        .map((assignee) => ({
-          id: assignee.id,
-          name: assignee.name,
-          defaultTitle: `${assignee.name} 작업`,
-          assigneeAgentId: assignee.id,
-          templateKey: assignee.templateKey,
-          imageUrl: assignee.imageUrl ?? undefined,
-        })),
-      ...DEFAULT_AGENT_CHOICES.filter(
-        (choice) => !assignees.some((assignee) => assignee.templateKey === choice.templateKey),
-      ),
-    ],
+  const agentChoices = useMemo<WorkflowAgentChoice[]>(
+    () => buildWorkflowAgentChoices(assignees),
     [assignees],
   )
 
@@ -460,10 +423,7 @@ function WorkflowTemplateEditorInner({
     setEditingSlot(slotKey)
     setComposerAgent({
       id: node.assigneeAgentId ?? node.templateKey ?? 'unknown',
-      name:
-        assignees.find((a) => a.id === node.assigneeAgentId)?.name ??
-        DEFAULT_AGENT_CHOICES.find((c) => c.templateKey === node.templateKey)?.name ??
-        '에이전트',
+      name: assignees.find((a) => a.id === node.assigneeAgentId)?.name ?? '에이전트',
       defaultTitle: node.title,
       assigneeAgentId: node.assigneeAgentId,
       templateKey: node.templateKey ?? undefined,
@@ -482,36 +442,7 @@ function WorkflowTemplateEditorInner({
     setEditingSlot(null)
   }
 
-  const handleSelectAgent = async (agent: AgentChoice) => {
-    if (agent.provided && agent.templateKey === 'default') {
-      setComposerAgent({
-        ...agent,
-        assigneeAgentId: null,
-      })
-      return
-    }
-    if (agent.provided && agent.templateKey) {
-      setComposerAgentBusy(true)
-      try {
-        let next = await onEnsureDefaultAgents()
-        let matched = next.find((assignee) => assignee.templateKey === agent.templateKey) ?? null
-        if (!matched) {
-          next = await onEnsureProvidedAgent(agent.templateKey)
-          matched = next.find((assignee) => assignee.templateKey === agent.templateKey) ?? null
-        }
-        setComposerAgent({
-          id: matched?.id ?? agent.id,
-          name: matched?.name ?? agent.name,
-          defaultTitle: agent.defaultTitle,
-          assigneeAgentId: matched?.id ?? null,
-          templateKey: agent.templateKey,
-          imageUrl: matched?.imageUrl ?? agent.imageUrl ?? null,
-        })
-      } finally {
-        setComposerAgentBusy(false)
-      }
-      return
-    }
+  const handleSelectAgent = async (agent: WorkflowAgentChoice) => {
     setComposerAgent(agent)
   }
 
@@ -653,44 +584,17 @@ function WorkflowTemplateEditorInner({
     }
     setBusyRunning(true)
     try {
-      const execution = await instantiateWorkflowTemplate(sessionId, selectedTemplate.templateId)
+      const result = await runWorkflowTemplate({
+        assignees,
+        sendChatMessage,
+        sessionId,
+        template: selectedTemplate,
+      })
       toast.success(`"${selectedTemplate.name}" 작업 생성됨`)
-      // 팀장 에이전트한테 시작 신호 — 이미 만들어진 자식 작업들을 명시해 위임 유도
-      try {
-        const children = execution.children.map((child) => {
-          const templateNode = selectedTemplate.graph.nodes.find((n) => n.slotKey === child.slotKey)
-          return {
-            slotKey: child.slotKey,
-            workId: child.workId,
-            identifier: child.identifier,
-            title: child.title,
-            description: templateNode?.description ?? child.title,
-            assigneeAgentId: child.assigneeAgentId,
-            assigneeName:
-              assignees.find((a) => a.id === child.assigneeAgentId)?.name ??
-              DEFAULT_AGENT_CHOICES.find((c) => c.templateKey === templateNode?.templateKey)
-                ?.name ??
-              '에이전트',
-          }
-        })
-        const trigger = buildWorkflowRunTrigger({
-          templateName: selectedTemplate.name,
-          templateDescription: selectedTemplate.description,
-          children,
-          edges: selectedTemplate.graph.edges,
-        })
-        const inputPayload = buildWorkflowRunInputPayload({
-          templateId: selectedTemplate.templateId,
-          templateName: selectedTemplate.name,
-          rootWorkId: execution.rootWorkId,
-          childWorkIds: execution.childWorkIds,
-          childrenBySlotKey: execution.childrenBySlotKey,
-          children,
-        })
-        await sendChatMessage({ sessionId, content: trigger, inputPayload })
+      if (result.chatSent) {
         toast.success('팀장 에이전트에게 시작 신호 전송됨')
-      } catch (chatError) {
-        console.error('sendChatMessage failed', chatError)
+      } else {
+        console.error('sendChatMessage failed', result.chatError)
         toast.warning('작업은 생성됐지만 채팅 메시지 실패. 채팅창에서 수동으로 시작하세요')
       }
     } catch (error) {
@@ -1631,16 +1535,16 @@ function NodeComposer({
   onSubmit,
   title,
 }: {
-  agent: AgentChoice | null
+  agent: WorkflowAgentChoice | null
   agentBusy: boolean
-  agents: AgentChoice[]
+  agents: WorkflowAgentChoice[]
   description: string
   editing: boolean
   onCancel: () => void
   onChangeAgent: () => void
   onChangeDescription: (value: string) => void
   onChangeTitle: (value: string) => void
-  onSelectAgent: (agent: AgentChoice) => void | Promise<void>
+  onSelectAgent: (agent: WorkflowAgentChoice) => void | Promise<void>
   onSubmit: () => void
   title: string
 }) {
@@ -1768,8 +1672,7 @@ function resolveAgentName(node: ApiTplNode, assignees: BoardAssignee[]): string 
     if (found) return found.name
   }
   if (node.templateKey) {
-    const tmpl = DEFAULT_AGENT_CHOICES.find((c) => c.templateKey === node.templateKey)
-    if (tmpl) return tmpl.name
+    return '에이전트'
   }
   return '에이전트'
 }
@@ -1781,46 +1684,3 @@ function resolveAgentImage(node: ApiTplNode, assignees: BoardAssignee[]): string
   }
   return null
 }
-
-const DEFAULT_AGENT_CHOICES: AgentChoice[] = [
-  {
-    id: 'provided-default',
-    name: '기본 에이전트',
-    defaultTitle: '보조 작업',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'default',
-  },
-  {
-    id: 'provided-coder',
-    name: '개발 에이전트',
-    defaultTitle: '개발 작업',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'coder',
-  },
-  {
-    id: 'provided-qa',
-    name: 'QA 에이전트',
-    defaultTitle: '검증 작업',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'qa',
-  },
-  {
-    id: 'provided-ux-designer',
-    name: 'UX 디자이너',
-    defaultTitle: 'UX 검토',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'ux_designer',
-  },
-  {
-    id: 'provided-security',
-    name: '보안 에이전트',
-    defaultTitle: '보안 검토',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'security_engineer',
-  },
-]

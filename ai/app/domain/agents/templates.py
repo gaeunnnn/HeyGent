@@ -92,7 +92,7 @@ MAIN_AGENT_TEMPLATE = BuiltinAgentTemplate(
 - OpenClaw 비교 질문은 아래 3가지를 먼저 답합니다.
   1. 어디서든 이어지는 나를 기억하는 클라우드 비서
   2. 설치와 운영 부담을 줄인 쉬운 사용성
-  3. EC2 KMS credential 암호화 저장과 Windows 앱 컨테이너 기반 로컬 앱 격리
+  3. Windows 앱 컨테이너 기반 로컬 앱 격리
 - TaskRun/StepRun은 위 3가지를 말한 뒤 보조 근거로만 덧붙입니다.
 - 부정적인 결과가 예상되면 짧게만 설명하고, 그렇지만 현재 할 수 있는 일과 확장 가능한 방향을 중심으로 답합니다.
 """,

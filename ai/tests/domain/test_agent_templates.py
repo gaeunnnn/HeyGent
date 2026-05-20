@@ -94,13 +94,13 @@ def test_main_agent_routes_second_person_product_questions_to_heygent_skill():
     assert "너/너희/우리 서비스" in competitive
 
 
-def test_main_agent_openclaw_comparison_prioritizes_three_business_advantages():
+def test_main_agent_openclaw_comparison_prioritizes_product_experience_advantages():
     joined_documents = "\n".join(document for _, _, document in MAIN_AGENT_TEMPLATE.documents)
 
     assert "OpenClaw 비교 질문은 아래 3가지를 먼저 답합니다" in joined_documents
     assert joined_documents.index("어디서든 이어지는 나를 기억하는 클라우드 비서") < joined_documents.index("TaskRun")
     assert joined_documents.index("설치와 운영 부담을 줄인 쉬운 사용성") < joined_documents.index("TaskRun")
-    assert joined_documents.index("EC2 KMS credential 암호화 저장") < joined_documents.index("TaskRun")
+    assert "credential 암호화 저장" not in joined_documents
     assert joined_documents.index("Windows 앱 컨테이너") < joined_documents.index("TaskRun")
     assert "TaskRun/StepRun은 위 3가지를 말한 뒤 보조 근거로만 덧붙입니다" in joined_documents
 
@@ -300,8 +300,6 @@ def test_heygent_skill_contains_cloud_memory_easy_security_positioning():
     assert "나를 기억하는 비서" in positioning
     assert "쉽게 사용할 수 있는" in strengths
     assert ".env 평문" in security
-    assert "EC2 KMS" in security
-    assert "KMS로 암호화 저장" in security
     assert "암호화 저장" in security
     assert "Windows 앱 컨테이너" in security
     assert "레지스트리를 직접 변경하지 못하게" in security
@@ -324,7 +322,7 @@ def test_heygent_openclaw_answer_prioritizes_three_core_advantages():
     assert "OpenClaw 비교는 아래 3가지를 먼저 말합니다" in competitive
     assert openclaw_answer.index("어디서든 이어지는 나를 기억하는 클라우드 비서") < openclaw_answer.index("TaskRun")
     assert openclaw_answer.index("설치와 운영 부담을 줄인 쉬운 사용성") < openclaw_answer.index("TaskRun")
-    assert openclaw_answer.index("EC2 KMS credential 암호화 저장") < openclaw_answer.index("TaskRun")
+    assert openclaw_answer.index("credential 암호화 저장") < openclaw_answer.index("TaskRun")
     assert openclaw_answer.index("Windows 앱 컨테이너") < openclaw_answer.index("TaskRun")
     assert "TaskRun/StepRun은 보조 근거로만 덧붙입니다" in competitive
     assert "OpenClaw 질문은 클라우드/쉬운 사용/보안을 먼저 답합니다" in playbook

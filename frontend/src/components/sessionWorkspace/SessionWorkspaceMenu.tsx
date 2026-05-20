@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   Check,
+  CalendarClock,
   ChevronLeft,
   ChevronRight,
   Edit3,
@@ -55,6 +56,7 @@ const MENU_ITEMS: Array<{
   { id: 'chat', label: '채팅', icon: MessageSquare },
   { id: 'visualization', label: '시각화', icon: Map },
   { id: 'workflow', label: '워크플로우', icon: GitBranch },
+  { id: 'routine', label: '루틴', icon: CalendarClock },
   { id: 'issueBoard', label: '작업', icon: FolderKanban },
 ]
 

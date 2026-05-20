@@ -35,7 +35,11 @@ import {
   formatAgentRunCostUsage,
   formatAgentRunTokenUsage,
 } from '@/components/sessionWorkspace/agentUsageDisplay'
-import { WorkBoardPanel, WorkflowPanel } from '@/components/sessionWorkspace/work/board'
+import {
+  WorkBoardPanel,
+  WorkflowPanel,
+  WorkflowRoutinePanel,
+} from '@/components/sessionWorkspace/work/board'
 import { SubAgentsPanel } from '@/components/sessionWorkspace/subAgents'
 import {
   SUB_AGENT_ADAPTER_OPTIONS,
@@ -114,6 +118,9 @@ export function SessionWorkspaceDetailPanel({
   }
   if (activePanel === 'workflow') {
     return <WorkflowPanel sessionId={sessionId} />
+  }
+  if (activePanel === 'routine') {
+    return <WorkflowRoutinePanel key={sessionId} sessionId={sessionId} />
   }
   if (session === null) {
     const title = activePanel === 'ceo' ? '팀장 에이전트' : '세션'

@@ -1,2 +1,8 @@
-export type WorkspacePanelId = 'ceo' | 'visualization' | 'issueBoard' | 'subAgents' | 'workflow'
+export type WorkspacePanelId =
+  | 'ceo'
+  | 'visualization'
+  | 'issueBoard'
+  | 'subAgents'
+  | 'workflow'
+  | 'routine'
 export type WorkspaceNavId = 'chat' | WorkspacePanelId

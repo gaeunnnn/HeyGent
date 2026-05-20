@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { SessionWorkspaceMenu } from './SessionWorkspaceMenu'
+import { WorkflowRoutineRunner } from './work/board'
 import {
   getCurrentWorkspaceSessionId,
   getWorkspacePanelFromPath,
@@ -110,19 +111,22 @@ export function SessionWorkspaceSidebar() {
   }
 
   return (
-    <SessionWorkspaceMenu
-      key={sessionId}
-      activePanel={activePanel}
-      collapsed={sessionWorkspaceCollapsed}
-      currentRoute={currentRoute}
-      session={session}
-      sessionId={sessionId}
-      activeSubAgentId={activeSubAgentId}
-      onCollapsedChange={setSessionWorkspaceCollapsed}
-      onCreateSubAgent={handleCreateSubAgent}
-      onDeleteSession={handleDeleteSession}
-      onOpenSubAgent={handleOpenSubAgent}
-      onSelectPanel={handleSelectPanel}
-    />
+    <>
+      <WorkflowRoutineRunner sessionId={sessionId} />
+      <SessionWorkspaceMenu
+        key={sessionId}
+        activePanel={activePanel}
+        collapsed={sessionWorkspaceCollapsed}
+        currentRoute={currentRoute}
+        session={session}
+        sessionId={sessionId}
+        activeSubAgentId={activeSubAgentId}
+        onCollapsedChange={setSessionWorkspaceCollapsed}
+        onCreateSubAgent={handleCreateSubAgent}
+        onDeleteSession={handleDeleteSession}
+        onOpenSubAgent={handleOpenSubAgent}
+        onSelectPanel={handleSelectPanel}
+      />
+    </>
   )
 }

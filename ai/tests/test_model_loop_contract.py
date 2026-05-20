@@ -482,7 +482,7 @@ def test_heygent_catalog_description_surfaces_openclaw_answer_priorities():
     assert "OpenClaw" in prompt
     assert "클라우드 기억 비서" in prompt
     assert "쉬운 사용" in prompt
-    assert "EC2 KMS" in prompt
+    assert "credential 암호화 저장" in prompt
     assert "Windows 앱 컨테이너" in prompt
 
 

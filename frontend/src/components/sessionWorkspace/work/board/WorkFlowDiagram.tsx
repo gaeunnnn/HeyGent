@@ -24,21 +24,12 @@ import { cn } from '@/components/ui/utils'
 import type { IssueBoardIssue } from '../model/issueBoardModel'
 import type { BoardAssignee } from './issueBoardPanelTypes'
 import { assigneeImageUrl, assigneeLabel } from './issueBoardPanelUtils'
+import { buildWorkflowAgentChoices, type WorkflowAgentChoice } from './workflowAgentChoices'
 
 type CreateWorkInput = {
   assigneeAgentId: string | null
   description: string
   title: string
-}
-
-type AgentChoice = {
-  assigneeAgentId: string | null
-  defaultTitle: string
-  id: string
-  imageUrl?: string | null
-  name: string
-  provided?: boolean
-  templateKey?: string
 }
 
 const CEO_PROFILE_IMAGE = '/assets/agents/ceo/ceo_profile_img.png'
@@ -92,7 +83,6 @@ export function WorkFlowDiagram(props: {
   onRemoveRelation?: (sourceId: string, targetId: string) => void
   onCreateChildWork: (parentId: string, input: CreateWorkInput) => void
   onCreateRootWork: (input: CreateWorkInput) => void
-  onEnsureDefaultAgents: () => Promise<BoardAssignee[]>
   onOpenIssue: (issueId: string) => void
   onReorderChildWork: (parentId: string, workIds: string[]) => void
 }) {
@@ -110,7 +100,6 @@ function WorkFlowDiagramInner({
   onRemoveRelation,
   onCreateChildWork,
   onCreateRootWork,
-  onEnsureDefaultAgents,
   onOpenIssue,
 }: {
   assignees: BoardAssignee[]
@@ -119,7 +108,6 @@ function WorkFlowDiagramInner({
   onRemoveRelation?: (sourceId: string, targetId: string) => void
   onCreateChildWork: (parentId: string, input: CreateWorkInput) => void
   onCreateRootWork: (input: CreateWorkInput) => void
-  onEnsureDefaultAgents: () => Promise<BoardAssignee[]>
   onOpenIssue: (issueId: string) => void
   onReorderChildWork: (parentId: string, workIds: string[]) => void
 }) {
@@ -244,10 +232,10 @@ function WorkFlowDiagramInner({
   // 모달
   const [composerOpen, setComposerOpen] = useState(false)
   const [composerParentId, setComposerParentId] = useState<string | null>(null)
-  const [composerAgent, setComposerAgent] = useState<AgentChoice | null>(null)
+  const [composerAgent, setComposerAgent] = useState<WorkflowAgentChoice | null>(null)
   const [composerTitle, setComposerTitle] = useState('')
   const [composerDescription, setComposerDescription] = useState('')
-  const [composerAgentBusy, setComposerAgentBusy] = useState(false)
+  const composerAgentBusy = false
 
   // 잇기 상태
   const [connectingSourceId, setConnectingSourceId] = useState<string | null>(null)
@@ -282,22 +270,8 @@ function WorkFlowDiagramInner({
     return () => clearTimeout(id)
   }, [deletingEdge])
 
-  const agentChoices = useMemo<AgentChoice[]>(
-    () => [
-      ...assignees
-        .filter((assignee) => assignee.id !== 'CEO')
-        .map((assignee) => ({
-          id: assignee.id,
-          name: assignee.name,
-          defaultTitle: `${assignee.name} 작업`,
-          assigneeAgentId: assignee.id,
-          templateKey: assignee.templateKey,
-          imageUrl: assignee.imageUrl ?? undefined,
-        })),
-      ...DEFAULT_AGENT_CHOICES.filter(
-        (choice) => !assignees.some((assignee) => assignee.templateKey === choice.templateKey),
-      ),
-    ],
+  const agentChoices = useMemo<WorkflowAgentChoice[]>(
+    () => buildWorkflowAgentChoices(assignees),
     [assignees],
   )
 
@@ -458,25 +432,7 @@ function WorkFlowDiagramInner({
     setComposerDescription('')
   }
 
-  const handleSelectAgent = async (agent: AgentChoice) => {
-    if (agent.provided && agent.templateKey) {
-      setComposerAgentBusy(true)
-      try {
-        const next = await onEnsureDefaultAgents()
-        const matched = next.find((assignee) => assignee.templateKey === agent.templateKey) ?? null
-        setComposerAgent({
-          id: matched?.id ?? agent.id,
-          name: matched?.name ?? agent.name,
-          defaultTitle: agent.defaultTitle,
-          assigneeAgentId: matched?.id ?? null,
-          templateKey: agent.templateKey,
-          imageUrl: matched?.imageUrl ?? agent.imageUrl ?? null,
-        })
-      } finally {
-        setComposerAgentBusy(false)
-      }
-      return
-    }
+  const handleSelectAgent = async (agent: WorkflowAgentChoice) => {
     setComposerAgent(agent)
   }
 
@@ -1205,16 +1161,16 @@ function WorkComposer({
   onSubmit,
   title,
 }: {
-  agent: AgentChoice | null
+  agent: WorkflowAgentChoice | null
   agentBusy: boolean
-  agents: AgentChoice[]
+  agents: WorkflowAgentChoice[]
   description: string
   isRoot: boolean
   onCancel: () => void
   onChangeAgent: () => void
   onChangeDescription: (value: string) => void
   onChangeTitle: (value: string) => void
-  onSelectAgent: (agent: AgentChoice) => void | Promise<void>
+  onSelectAgent: (agent: WorkflowAgentChoice) => void | Promise<void>
   onSubmit: () => void
   title: string
 }) {
@@ -1367,49 +1323,6 @@ function StatusDot({
     />
   )
 }
-
-const DEFAULT_AGENT_CHOICES: AgentChoice[] = [
-  {
-    id: 'provided-default',
-    name: '기본 에이전트',
-    defaultTitle: '보조 작업',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'default',
-  },
-  {
-    id: 'provided-coder',
-    name: '개발 에이전트',
-    defaultTitle: '개발 작업',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'coder',
-  },
-  {
-    id: 'provided-qa',
-    name: 'QA 에이전트',
-    defaultTitle: '검증 작업',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'qa',
-  },
-  {
-    id: 'provided-ux-designer',
-    name: 'UX 디자이너',
-    defaultTitle: 'UX 검토',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'ux_designer',
-  },
-  {
-    id: 'provided-security',
-    name: '보안 에이전트',
-    defaultTitle: '보안 검토',
-    assigneeAgentId: null,
-    provided: true,
-    templateKey: 'security_engineer',
-  },
-]
 
 // 두 노드 사이 직선이 각 노드 사각형 테두리와 만나는 점 계산
 function computeFloatingEdgePoints(

@@ -47,6 +47,9 @@ export function getWorkspacePanelFromPath(pathname: string): WorkspacePanelId | 
   if (panelSlug === 'workflow') {
     return 'workflow'
   }
+  if (panelSlug === 'routine') {
+    return 'routine'
+  }
   return null
 }
 
@@ -62,6 +65,9 @@ export function getWorkspacePanelPath(sessionId: string, panelId: WorkspacePanel
   }
   if (panelId === 'workflow') {
     return `/session/${sessionId}/workspace/workflow`
+  }
+  if (panelId === 'routine') {
+    return `/session/${sessionId}/workspace/routine`
   }
   return `/session/${sessionId}/workspace/visualization`
 }
