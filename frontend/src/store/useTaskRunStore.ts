@@ -752,7 +752,9 @@ const buildRealtimeStepRunPlaceholder = (
     ...(existingStepRun ?? {}),
     step_run_id: event.step_run_id,
     task_run_id: existingStepRun?.task_run_id ?? event.task_run_id,
-    title: existingStepRun?.title ?? inferRealtimeStepRunTitle(event),
+    title: isGenericStepRunTitle(existingStepRun?.title)
+      ? (inferRealtimeStepRunTitle(event) ?? existingStepRun?.title)
+      : (existingStepRun?.title ?? inferRealtimeStepRunTitle(event)),
     status: nextStatus ?? existingStepRun?.status,
     step_order:
       existingStepRun?.step_order ??
@@ -852,6 +854,9 @@ const normalizeRealtimeStepRunStatus = (
       return undefined
   }
 }
+
+const isGenericStepRunTitle = (title?: string | null) =>
+  !title || title.toLowerCase().includes('agent loop')
 
 const inferRealtimeStepRunTitle = (event: RawTaskEventPayload) =>
   (event.event_type.startsWith('step.')
