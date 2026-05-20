@@ -95,6 +95,20 @@ class FakeRuntimeWorkRepository:
         self.relations.append(relation)
         return relation
 
+    def list_children(self, parent_id: str) -> list[WorkItem]:
+        return [item for item in self.items.values() if item.parent_id == parent_id]
+
+    def list_relations(self, work_id: str) -> list[WorkRelation]:
+        return [
+            relation
+            for relation in self.relations
+            if relation.source_work_id == work_id or relation.target_work_id == work_id
+        ]
+
+    def list_runs(self, work_id: str, *, limit: int = 50, offset: int = 0) -> list[WorkRunLink]:
+        runs = [run for (run_work_id, _), run in self.runs.items() if run_work_id == work_id]
+        return runs[offset : offset + limit]
+
 
 class FakeRuntimeAgentRepository:
     def __init__(self, profile: dict) -> None:
@@ -251,6 +265,17 @@ def test_runtime_exposes_notion_execute_only_for_notion_toolset():
     assert "notion.execute" not in resolve_runtime_tool_names(("local-core",))
 
 
+def test_runtime_exposes_health_execute_only_for_health_toolset():
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore())
+
+    definitions = runtime.list_tool_definitions(enabled_toolsets=("health",))
+
+    assert [definition["name"] for definition in definitions] == ["health.execute"]
+    schema = definitions[0]["schema"]
+    assert "commands" in schema["parameters"]["properties"]
+    assert "health.execute" not in resolve_runtime_tool_names(("local-core",))
+
+
 def test_notion_runtime_binds_owner_user_id_and_ignores_model_user_id(monkeypatch):
     captured = {}
 
@@ -276,6 +301,37 @@ def test_notion_runtime_binds_owner_user_id_and_ignores_model_user_id(monkeypatc
             ],
         },
         enabled_toolsets=("notion",),
+    )
+
+    assert result["ok"] is True
+    assert captured["_trusted_user_id"] == "7"
+    assert "userId" not in captured
+
+
+def test_health_runtime_binds_owner_user_id_and_ignores_model_user_id(monkeypatch):
+    captured = {}
+
+    def fake_execute_health_handler(args):
+        captured.update(args)
+        return {"ok": True, "results": []}
+
+    from app.tools.health import health_tool
+
+    monkeypatch.setattr(health_tool, "execute_health_handler", fake_execute_health_handler)
+    runtime = LocalToolRuntime(skill_registry=object(), session_store=DummySessionStore()).bind_request_context(owner_key="7")
+
+    result = runtime.run_call(
+        name="health.execute",
+        args={
+            "userId": 999,
+            "commands": [
+                {
+                    "method": "GET",
+                    "endpoint": "/api/v1/health/me/latest",
+                }
+            ],
+        },
+        enabled_toolsets=("health",),
     )
 
     assert result["ok"] is True
@@ -334,6 +390,53 @@ def test_disabled_skill_readers_are_unavailable_even_with_enabled_skill_context(
     assert read_result["body"] == "# Weather"
     assert file_result["ok"] is False
     assert file_result["error"]["code"] == "skill_disabled"
+
+
+def test_custom_inline_skill_files_are_read_from_registry_metadata():
+    registry = SkillRegistry()
+    registry.register_many(
+        [
+            {
+                "name": "meeting-notes",
+                "description": "회의 내용을 요약합니다.",
+                "path": "custom://custom:7:meeting-notes/SKILL.md",
+                "body": "# Meeting Notes",
+                "metadata": {
+                    "documents": [
+                        {
+                            "documentKey": "references/style.md",
+                            "content": "# Style",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=registry,
+        session_store=DummySessionStore(),
+        runtime_context={"enabledSkillNames": ["meeting-notes"]},
+    )
+
+    skill_file = runtime.run_call(
+        name="skills.read_file",
+        args={"skill_name": "meeting-notes", "path": "SKILL.md"},
+        enabled_toolsets=("skills",),
+    )
+    reference_file = runtime.run_call(
+        name="skills.read_file",
+        args={"skill_name": "meeting-notes", "path": "references/style.md"},
+        enabled_toolsets=("skills",),
+    )
+    inspected = runtime.run_call(
+        name="skill.execute",
+        args={"skill_name": "meeting-notes", "action": "inspect"},
+        enabled_toolsets=("skills",),
+    )
+
+    assert skill_file["content"] == "# Meeting Notes"
+    assert reference_file["content"] == "# Style"
+    assert inspected["files"] == ["SKILL.md", "references/style.md"]
 
 
 def test_web_is_available_in_local_core_and_safe_without_removed_extract_or_browser_tools():
@@ -837,6 +940,389 @@ def test_session_agent_task_can_record_parent_dependency_without_changing_status
     assert work_repository.relations == [
         WorkRelation(source_work_id=child_id, target_work_id=parent.work_id, relation_type="blocks")
     ]
+
+
+def test_session_agent_task_strict_workflow_reuses_existing_child_work():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    child = WorkItem(
+        work_id="work-child",
+        identifier="TASK-2",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="삼성 관련 조사",
+        description="삼성 관련 최신 동향을 조사한다.",
+        status="todo",
+        assignee_agent_id="agent-research",
+        parent_id=parent.work_id,
+        metadata={"workflowSlotKey": "research"},
+    )
+    work_repository.items[parent.work_id] = parent
+    work_repository.items[child.work_id] = child
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-research",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.research",
+            "config_snapshot": {"name": "Research", "role": "research"},
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={
+            "workId": parent.work_id,
+            "workflowExecution": {
+                "mode": "strict_reuse_children",
+                "rootWorkId": parent.work_id,
+                "childWorkIds": [child.work_id],
+                "childrenBySlotKey": {"research": child.work_id},
+            },
+        },
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={
+            "childWorkId": child.work_id,
+            "title": "새로 만들면 안 되는 제목",
+            "instruction": "이미 만들어진 child를 실행한다.",
+        },
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is True
+    assert result["reused"] is True
+    assert result["workflowExecution"]["mode"] == "strict_reuse_children"
+    assert result["child_work"]["workId"] == child.work_id
+    assert result["child_work"]["title"] == "삼성 관련 조사"
+    assert result["startExecution"] is True
+    assert len(work_repository.items) == 2
+    assert work_repository.comments == []
+
+
+def test_session_agent_task_strict_workflow_reuses_child_by_slot_key():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    child = WorkItem(
+        work_id="work-child",
+        identifier="TASK-2",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="삼성 관련 조사",
+        description="삼성 관련 최신 동향을 조사한다.",
+        status="todo",
+        assignee_agent_id="agent-research",
+        parent_id=parent.work_id,
+        metadata={"workflowSlotKey": "research"},
+    )
+    work_repository.items[parent.work_id] = parent
+    work_repository.items[child.work_id] = child
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-research",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.research",
+            "config_snapshot": {"name": "Research", "role": "research"},
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={
+            "workId": parent.work_id,
+            "workflowExecution": {
+                "mode": "strict_reuse_children",
+                "rootWorkId": parent.work_id,
+                "childWorkIds": [child.work_id],
+                "childrenBySlotKey": {"research": child.work_id},
+            },
+        },
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={
+            "workflowSlotKey": "research",
+            "title": "slot key로 선택",
+            "instruction": "이미 만들어진 child를 실행한다.",
+        },
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is True
+    assert result["reused"] is True
+    assert result["child_work"]["workId"] == child.work_id
+    assert len(work_repository.items) == 2
+
+
+def test_session_agent_task_strict_workflow_rejects_new_child_creation():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    child = WorkItem(
+        work_id="work-child",
+        identifier="TASK-2",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="삼성 관련 조사",
+        description="삼성 관련 최신 동향을 조사한다.",
+        status="todo",
+        assignee_agent_id="agent-research",
+        parent_id=parent.work_id,
+        metadata={"workflowSlotKey": "research"},
+    )
+    work_repository.items[parent.work_id] = parent
+    work_repository.items[child.work_id] = child
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-research",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.research",
+            "config_snapshot": {"name": "Research", "role": "research"},
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={
+            "workId": parent.work_id,
+            "workflowExecution": {
+                "mode": "strict_reuse_children",
+                "rootWorkId": parent.work_id,
+                "childWorkIds": [child.work_id],
+                "childrenBySlotKey": {"research": child.work_id},
+            },
+        },
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={"title": "새 작업", "instruction": "새 child를 만들려고 한다."},
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "workflow_child_reuse_required"
+    assert result["error"]["recoverable"] is True
+    assert result["error"]["allowedChildren"][0]["workId"] == child.work_id
+    assert len(work_repository.items) == 2
+
+
+def test_session_agent_task_strict_workflow_rejects_unlisted_child_work_id():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    allowed_child = WorkItem(
+        work_id="work-child-allowed",
+        identifier="TASK-2",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="허용된 작업",
+        description="허용",
+        status="todo",
+        assignee_agent_id="agent-research",
+        parent_id=parent.work_id,
+        metadata={"workflowSlotKey": "research"},
+    )
+    other_child = WorkItem(
+        work_id="work-child-other",
+        identifier="TASK-3",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="허용되지 않은 작업",
+        description="비허용",
+        status="todo",
+        assignee_agent_id="agent-research",
+        parent_id=parent.work_id,
+    )
+    work_repository.items[parent.work_id] = parent
+    work_repository.items[allowed_child.work_id] = allowed_child
+    work_repository.items[other_child.work_id] = other_child
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-research",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.research",
+            "config_snapshot": {"name": "Research", "role": "research"},
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={
+            "workId": parent.work_id,
+            "workflowExecution": {
+                "mode": "strict_reuse_children",
+                "rootWorkId": parent.work_id,
+                "childWorkIds": [allowed_child.work_id],
+                "childrenBySlotKey": {"research": allowed_child.work_id},
+            },
+        },
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={"childWorkId": other_child.work_id, "title": "비허용", "instruction": "비허용 child 실행"},
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "workflow_child_not_allowed"
+    assert result["error"]["recoverable"] is True
+    assert len(work_repository.items) == 3
+
+
+def test_session_agent_task_strict_workflow_allows_handoff_after_completed_blocker_run():
+    work_repository = FakeRuntimeWorkRepository()
+    parent = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="부모",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    blocker = WorkItem(
+        work_id="work-blocker",
+        identifier="TASK-2",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="삼성 관련 조사",
+        description="조사",
+        status="in_review",
+        assignee_agent_id="agent-research",
+        parent_id=parent.work_id,
+        active_run_id=None,
+        latest_run_id="task-blocker",
+        metadata={"workflowSlotKey": "research"},
+    )
+    child = WorkItem(
+        work_id="work-child",
+        identifier="TASK-3",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="조사 기반 화면 작성",
+        description="화면",
+        status="todo",
+        assignee_agent_id="agent-ux",
+        parent_id=parent.work_id,
+        metadata={"workflowSlotKey": "screen"},
+    )
+    work_repository.items[parent.work_id] = parent
+    work_repository.items[blocker.work_id] = blocker
+    work_repository.items[child.work_id] = child
+    work_repository.relations.append(
+        WorkRelation(
+            source_work_id=blocker.work_id,
+            target_work_id=child.work_id,
+            relation_type="blocks",
+        )
+    )
+    work_repository.runs[(blocker.work_id, "task-blocker")] = WorkRunLink(
+        work_id=blocker.work_id,
+        task_run_id="task-blocker",
+        run_kind="initial",
+        status="COMPLETED",
+    )
+    agent_repository = FakeRuntimeAgentRepository(
+        {
+            "profile_id": "agent-ux",
+            "session_id": "session-1",
+            "agent_type": "user_subagent",
+            "profile_key": "session.ux",
+            "config_snapshot": {"name": "UX", "role": "designer"},
+        }
+    )
+    runtime = LocalToolRuntime(
+        skill_registry=object(),
+        session_store=DummySessionStore(),
+        work_repository=work_repository,
+        agent_repository=agent_repository,
+        runtime_context={
+            "workId": parent.work_id,
+            "workflowExecution": {
+                "mode": "strict_reuse_children",
+                "rootWorkId": parent.work_id,
+                "childWorkIds": [blocker.work_id, child.work_id],
+                "childrenBySlotKey": {"research": blocker.work_id, "screen": child.work_id},
+            },
+        },
+    )
+
+    result = runtime.run_call(
+        name="session_agent_task",
+        args={
+            "workflowSlotKey": "screen",
+            "title": "화면 작성",
+            "instruction": "조사 결과 기반 화면을 만든다.",
+        },
+        enabled_toolsets=("work",),
+    )
+
+    assert result["ok"] is True
+    assert result["reused"] is True
+    assert result["child_work"]["workId"] == child.work_id
 
 
 def test_delegate_task_normalizes_tool_names_to_worker_toolsets():

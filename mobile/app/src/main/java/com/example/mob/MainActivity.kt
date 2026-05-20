@@ -26,10 +26,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -64,6 +67,7 @@ import com.example.mob.data.remote.RetrofitClient
 import com.example.mob.feature.auth.LoginScreen
 import com.example.mob.feature.chat.ChatScreen
 import com.example.mob.feature.chat.ChatViewModel
+import com.example.mob.feature.chat.VoiceCaptureOverlay
 import com.example.mob.feature.health.HealthViewModel
 import com.example.mob.feature.home.HomeScreen
 import com.example.mob.feature.profile.ProfileScreen
@@ -95,12 +99,16 @@ private sealed class Screen(
 private val bottomNavScreens = listOf(Screen.Chat, Screen.Home, Screen.Profile)
 
 class MainActivity : ComponentActivity() {
+    // 웨이크 워드("젠트야") 감지 시 카운터를 증가시켜 Compose 트리에 신호를 전달.
+    private val voiceWakeTrigger = mutableStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         KakaoSdk.init(this, getString(R.string.kakao_app_key))
         Log.d("KAKAO_KEY_HASH", Utility.getKeyHash(this))
         enableEdgeToEdge()
+        handleWakeIntent(intent)
         setContent {
             MOBTheme {
                 var splashDone by remember { mutableStateOf(false) }
@@ -115,9 +123,27 @@ class MainActivity : ComponentActivity() {
                 when {
                     !splashDone -> SplashScreen()
                     !isLoggedIn -> LoginScreen(onLoginSuccess = { isLoggedIn = true })
-                    else -> MainApp(onLogout = { isLoggedIn = false })
+                    else ->
+                        MainApp(
+                            onLogout = { isLoggedIn = false },
+                            voiceWakeTrigger = voiceWakeTrigger.value,
+                        )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleWakeIntent(intent)
+    }
+
+    private fun handleWakeIntent(intent: Intent?) {
+        if (intent?.action == WakeWordForegroundService.ACTION_WAKE_WORD_DETECTED) {
+            voiceWakeTrigger.value = voiceWakeTrigger.value + 1
+            // 같은 인텐트가 회전 등으로 다시 들어와 더블 트리거되지 않도록 액션 소거
+            intent.action = null
         }
     }
 }
@@ -187,7 +213,10 @@ private fun SplashScreen() {
 }
 
 @Composable
-private fun MainApp(onLogout: () -> Unit) {
+private fun MainApp(
+    onLogout: () -> Unit,
+    voiceWakeTrigger: Int,
+) {
     val context = LocalContext.current
     val healthViewModel = remember { HealthViewModel(context) }
 
@@ -221,68 +250,105 @@ private fun MainApp(onLogout: () -> Unit) {
     // 앱 세션 동안 유지 (앱 재실행 시 초기화됨)
     var activeChatSessionId by remember { mutableStateOf<String?>(null) }
     var agentName by remember { mutableStateOf("HeyGent") }
+    var voiceOverlayVisible by remember { mutableStateOf(false) }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            AppDrawer(
-                onClose = { scope.launch { drawerState.close() } },
-                agentName = agentName,
-                sessions = chatViewModel.sessions.collectAsState().value,
-                onNewChat = {
-                    activeChatSessionId = ""
-                    navController.navigate(Screen.Chat.route) { launchSingleTop = true }
-                    scope.launch { drawerState.close() }
-                },
-                onHistoryItemClick = { sessionId ->
-                    activeChatSessionId = sessionId
-                    navController.navigate(Screen.Chat.route) { launchSingleTop = true }
-                    scope.launch { drawerState.close() }
-                },
-            )
-        },
-    ) {
-        Scaffold(
-            bottomBar = { AppBottomBar(navController) },
-        ) { innerPadding ->
-            val bottomPadding = innerPadding.calculateBottomPadding()
-            val onMenuClick: () -> Unit = { scope.launch { drawerState.open() } }
+    val openVoiceOverlay: () -> Unit = { voiceOverlayVisible = true }
 
-            NavHost(
-                navController = navController,
-                startDestination = Screen.Home.route,
-                enterTransition = { EnterTransition.None },
-                exitTransition = { ExitTransition.None },
-                popEnterTransition = { EnterTransition.None },
-                popExitTransition = { ExitTransition.None },
-            ) {
-                composable(Screen.Chat.route) {
-                    ChatScreen(
-                        onMenuClick = onMenuClick,
-                        activeChatSessionId = activeChatSessionId,
-                        onActiveChatSessionChange = { activeChatSessionId = it },
-                        viewModel = chatViewModel,
-                        agentName = agentName,
-                        bottomPadding = bottomPadding,
-                    )
-                }
-                composable(Screen.Home.route) {
-                    HomeScreen(
-                        onMenuClick = onMenuClick,
-                        bottomPadding = bottomPadding,
-                    )
-                }
-                composable(Screen.Profile.route) {
-                    ProfileScreen(
-                        onMenuClick = onMenuClick,
-                        bottomPadding = bottomPadding,
-                        onLogout = onLogout,
-                        agentName = agentName,
-                        onAgentNameChange = { agentName = it },
-                        healthViewModel = healthViewModel,
-                    )
+    // "젠트야" 호출 감지 → 가장 최근 채팅 세션으로 이동 + 오버레이 자동 노출
+    LaunchedEffect(voiceWakeTrigger) {
+        if (voiceWakeTrigger == 0) return@LaunchedEffect
+
+        val cached = chatViewModel.sessions.value
+        val targetId =
+            if (cached.isNotEmpty()) {
+                cached.first().sessionId
+            } else {
+                chatViewModel.loadSessionsSuspend().firstOrNull()?.sessionId
+            }
+
+        // 세션이 있으면 그 세션으로, 없으면 새 세션
+        activeChatSessionId = targetId ?: ""
+        navController.navigate(Screen.Chat.route) { launchSingleTop = true }
+        voiceOverlayVisible = true
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                AppDrawer(
+                    onClose = { scope.launch { drawerState.close() } },
+                    agentName = agentName,
+                    sessions = chatViewModel.sessions.collectAsState().value,
+                    onNewChat = {
+                        activeChatSessionId = ""
+                        navController.navigate(Screen.Chat.route) { launchSingleTop = true }
+                        scope.launch { drawerState.close() }
+                    },
+                    onHistoryItemClick = { sessionId ->
+                        activeChatSessionId = sessionId
+                        navController.navigate(Screen.Chat.route) { launchSingleTop = true }
+                        scope.launch { drawerState.close() }
+                    },
+                )
+            },
+        ) {
+            Scaffold(
+                bottomBar = { AppBottomBar(navController) },
+            ) { innerPadding ->
+                val bottomPadding = innerPadding.calculateBottomPadding()
+                val onMenuClick: () -> Unit = { scope.launch { drawerState.open() } }
+
+                NavHost(
+                    navController = navController,
+                    startDestination = Screen.Home.route,
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
+                ) {
+                    composable(Screen.Chat.route) {
+                        ChatScreen(
+                            onMenuClick = onMenuClick,
+                            activeChatSessionId = activeChatSessionId,
+                            onActiveChatSessionChange = { activeChatSessionId = it },
+                            viewModel = chatViewModel,
+                            agentName = agentName,
+                            bottomPadding = bottomPadding,
+                            onVoiceMode = openVoiceOverlay,
+                        )
+                    }
+                    composable(Screen.Home.route) {
+                        HomeScreen(
+                            onMenuClick = onMenuClick,
+                            bottomPadding = bottomPadding,
+                        )
+                    }
+                    composable(Screen.Profile.route) {
+                        ProfileScreen(
+                            onMenuClick = onMenuClick,
+                            bottomPadding = bottomPadding,
+                            onLogout = onLogout,
+                            agentName = agentName,
+                            onAgentNameChange = { agentName = it },
+                            healthViewModel = healthViewModel,
+                        )
+                    }
                 }
             }
+        }
+
+        if (voiceOverlayVisible) {
+            val systemBottomInset =
+                WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            VoiceCaptureOverlay(
+                bottomInset = systemBottomInset,
+                onSend = { text ->
+                    voiceOverlayVisible = false
+                    chatViewModel.sendMessage(text)
+                },
+                onCancel = { voiceOverlayVisible = false },
+            )
         }
     }
 }

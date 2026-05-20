@@ -37,7 +37,8 @@ fun ChatScreen(
     onActiveChatSessionChange: (String?) -> Unit,
     viewModel: ChatViewModel,
     agentName: String = "HeyGent",
-    bottomPadding: Dp = 0.dp
+    bottomPadding: Dp = 0.dp,
+    onVoiceMode: () -> Unit = {}
 ) {
     val sessions by viewModel.sessions.collectAsState()
     val messages by viewModel.messages.collectAsState()
@@ -72,7 +73,8 @@ fun ChatScreen(
             onBack = { onActiveChatSessionChange(null) },
             onSend = { viewModel.sendMessage(it) },
             onStop = { viewModel.stopProcessing() },
-            bottomPadding = bottomPadding
+            bottomPadding = bottomPadding,
+            onVoiceMode = onVoiceMode
         )
     }
 }
@@ -188,13 +190,13 @@ private fun SingleChatView(
     onBack: () -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
-    bottomPadding: Dp
+    bottomPadding: Dp,
+    onVoiceMode: () -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     var showAttachMenu by remember { mutableStateOf(false) }
     var showModelPanel by remember { mutableStateOf(false) }
-    var isVoiceMode by remember { mutableStateOf(false) }
 
     val displayMessages = if (isProcessing) {
         messages + ChatMessage(isBot = true, text = "", timestamp = "", isTyping = true)
@@ -255,7 +257,7 @@ private fun SingleChatView(
                     },
                     onStop = onStop,
                     onPlusClick = { showAttachMenu = !showAttachMenu },
-                    onVoiceMode = { isVoiceMode = true }
+                    onVoiceMode = onVoiceMode
                 )
 
                 if (bottomPadding > 0.dp) Spacer(modifier = Modifier.height(bottomPadding))
@@ -307,9 +309,6 @@ private fun SingleChatView(
             }
         }
 
-        if (isVoiceMode) {
-            VoiceModeOverlay(onStop = { isVoiceMode = false })
-        }
     }
 }
 

@@ -8,7 +8,7 @@ from app.domain.orchestration.agent.loop import TaskEngine
 from app.domain.orchestration.runtime_planning.planner import Planner
 from app.domain.orchestration.prompts.skill_prompt import SkillLoader
 from app.domain.tasks.models import TaskRun
-from app.domain.work.models import WorkItem, WorkRunLink
+from app.domain.work.models import WorkItem, WorkRelation, WorkRunLink
 from app.tools.contracts import HandlerSpec
 from tests.fakes import InMemoryAgentRepository, InMemorySkillRepository, InMemoryTaskRepository
 
@@ -30,6 +30,7 @@ class FakeWorkRepository:
     def __init__(self) -> None:
         self.items: dict[str, WorkItem] = {}
         self.runs: dict[tuple[str, str], WorkRunLink] = {}
+        self.relations: list[WorkRelation] = []
         self.client_requests: dict[tuple[str, str], str] = {}
         self.label_links: list[tuple[str, str, str, tuple[str, ...]]] = []
         self.next_number = 0
@@ -86,6 +87,28 @@ class FakeWorkRepository:
 
     def add_comment(self, comment):
         return comment
+
+    def add_relation(
+        self,
+        *,
+        source_work_id: str,
+        target_work_id: str,
+        relation_type: str,
+    ) -> WorkRelation:
+        relation = WorkRelation(
+            source_work_id=source_work_id,
+            target_work_id=target_work_id,
+            relation_type=relation_type,
+        )
+        self.relations.append(relation)
+        return relation
+
+    def list_relations(self, work_id: str) -> list[WorkRelation]:
+        return [
+            relation
+            for relation in self.relations
+            if relation.source_work_id == work_id or relation.target_work_id == work_id
+        ]
 
 
 def test_successful_skill_execute_creates_work_and_links_current_task_run():
@@ -240,6 +263,91 @@ def test_session_agent_child_input_keeps_parent_prototype_session_binding():
 
     assert child_input["sessionId"] == "session-ui"
     assert child_input["promptMessageId"] == "msg-user"
+
+
+def test_workflow_child_input_includes_completed_blocker_result():
+    task_repository = InMemoryTaskRepository()
+    work_repository = FakeWorkRepository()
+    engine = _engine(
+        task_repository=task_repository,
+        work_repository=work_repository,
+    )
+    parent_work = WorkItem(
+        work_id="work-parent",
+        identifier="TASK-1",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="부모 작업",
+        description="첫 결과를 바탕으로 두 번째 결과를 만든다.",
+        status="in_progress",
+        assignee_agent_id="CEO",
+    )
+    research_work = WorkItem(
+        work_id="work-research",
+        identifier="TASK-2",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="짧은 조사 요약",
+        description="삼성 AI 전략을 요약한다.",
+        status="done",
+        assignee_agent_id="agent-research",
+        parent_id=parent_work.work_id,
+        latest_run_id="task-research",
+    )
+    screen_work = WorkItem(
+        work_id="work-screen",
+        identifier="TASK-3",
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        title="요약 기반 화면 구성",
+        description="앞선 요약을 바탕으로 화면 섹션을 구성한다.",
+        status="todo",
+        assignee_agent_id="agent-ux",
+        parent_id=parent_work.work_id,
+        execution_instruction="앞선 요약을 바탕으로 간단한 화면 섹션 3개를 텍스트로 구성한다.",
+    )
+    work_repository.create_work(parent_work)
+    work_repository.create_work(research_work)
+    work_repository.create_work(screen_work)
+    work_repository.add_relation(
+        source_work_id=research_work.work_id,
+        target_work_id=screen_work.work_id,
+        relation_type="blocks",
+    )
+    task_repository.create_task(
+        TaskRun(
+            task_run_id="task-research",
+            task_type="agent.loop",
+            owner_key="7",
+            session_key="session-1",
+            status=TaskStatus.COMPLETED,
+            result_payload={
+                "text": "- 온디바이스 AI 확대\n- AI 반도체 인프라 강화\n- 연결된 AI 경험 확대",
+            },
+        )
+    )
+
+    child_input = engine._build_session_agent_work_input(
+        parent_task=_task(
+            input_payload={
+                "workflowExecution": {
+                    "mode": "strict_reuse_children",
+                    "rootWorkId": parent_work.work_id,
+                    "childWorkIds": [research_work.work_id, screen_work.work_id],
+                    "childrenBySlotKey": {"research": research_work.work_id, "screen": screen_work.work_id},
+                },
+            }
+        ),
+        work=screen_work,
+    )
+
+    assert "## 선행 하위 작업 결과" in child_input["prompt"]
+    assert "TASK-2 세션 에이전트 실행 결과(COMPLETED)" in child_input["prompt"]
+    assert "온디바이스 AI 확대" in child_input["prompt"]
+    assert child_input["workflowPredecessorResults"][0]["workId"] == research_work.work_id
 
 
 def test_session_agent_parent_update_exposes_materialized_child_task_run():

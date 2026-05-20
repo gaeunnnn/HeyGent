@@ -14,6 +14,7 @@ TOOL_RESULT_READER_SOURCE_TOOLSETS = {
     "design",
     "file",
     "gmail",
+    "health",
     "local-core",
     "messaging",
     "notion",

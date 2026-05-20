@@ -9,6 +9,8 @@ from app.core.config import get_settings
 from app.tools.runtime.catalog import register_runtime_tool_definition
 
 
+MATTERMOST_MESSAGE_HEADER = "# :ai: HeyGent에서 온 메시지 입니다 :ai:"
+
 MATTERMOST_SEND_SCHEMA = {
     "name": "mattermost.send",
     "description": (
@@ -50,6 +52,7 @@ def send_mattermost_message_handler(args: dict[str, Any]) -> dict[str, Any]:
     message = str(args.get("message") or "").strip()
     if not message:
         return _tool_error("missing_message", "전송할 메시지가 없습니다.")
+    message = _with_mattermost_header(message)
 
     internal_token = str(settings.internal_service_token or "").strip()
     if not internal_token:
@@ -106,6 +109,12 @@ def _coerce_user_id(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
+
+
+def _with_mattermost_header(message: str) -> str:
+    if message.startswith(MATTERMOST_MESSAGE_HEADER):
+        return message
+    return f"{MATTERMOST_MESSAGE_HEADER}\n\n{message}"
 
 
 def _backend_error_message(error: HTTPError) -> str:

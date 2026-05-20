@@ -26,6 +26,10 @@ class SkillRegistry:
                 continue
             self._skills[name] = dict(skill)
 
+    def unregister_names(self, names: list[str]) -> None:
+        for name in names:
+            self._skills.pop(str(name or "").strip(), None)
+
     def resolve_hints(self, hints: list[str]) -> list[dict]:
         return [self._skills[hint] for hint in hints if hint in self._skills]
 

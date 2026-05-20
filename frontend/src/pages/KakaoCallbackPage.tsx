@@ -33,7 +33,7 @@ export function KakaoCallbackPage() {
         } catch {
           // 사용자 정보 조회 실패해도 로그인 자체는 진행
         }
-        navigate('/', { replace: true })
+        navigate('/agent-status', { replace: true })
       })
       .catch(() => {
         navigate('/login', { replace: true })

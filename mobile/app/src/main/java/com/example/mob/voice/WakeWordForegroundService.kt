@@ -37,6 +37,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
+    private var isPaused = false
     private var lastLaunchAtMillis = 0L
     private var lastRmsLogAtMillis = 0L
     private var lastLevelBucket = -1
@@ -58,7 +59,36 @@ class WakeWordForegroundService : Service(), RecognitionListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "Wake word service start requested.")
+        val action = intent?.action
+        Log.d(TAG, "Wake word service start requested. action=$action paused=$isPaused")
+
+        when (action) {
+            ACTION_PAUSE_LISTENING -> {
+                isPaused = true
+                mainHandler.removeCallbacksAndMessages(null)
+                // 마이크 자원을 즉시 해제하기 위해 인스턴스 자체를 파괴한다.
+                // cancel/stop만으로는 오디오 프레임워크 레벨에서 즉시 해제되지 않는 경우가 있다.
+                try { speechRecognizer?.cancel() } catch (_: Exception) {}
+                try { speechRecognizer?.stopListening() } catch (_: Exception) {}
+                try { speechRecognizer?.destroy() } catch (_: Exception) {}
+                speechRecognizer = null
+                isListening = false
+                Log.d(TAG, "Wake word listener paused (recognizer destroyed).")
+                return START_STICKY
+            }
+            ACTION_RESUME_LISTENING -> {
+                isPaused = false
+                if (!hasAudioPermission()) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                if (speechRecognizer == null) createRecognizer()
+                startListening()
+                Log.d(TAG, "Wake word listener resumed.")
+                return START_STICKY
+            }
+        }
+
         if (!hasAudioPermission()) {
             Log.w(TAG, "Missing RECORD_AUDIO permission on start command.")
             stopSelf()
@@ -68,7 +98,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         if (speechRecognizer == null) {
             createRecognizer()
         }
-        startListening()
+        if (!isPaused) startListening()
         return START_STICKY
     }
 
@@ -144,7 +174,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
     }
 
     private fun startListening() {
-        if (isListening || speechRecognizer == null) return
+        if (isPaused || isListening || speechRecognizer == null) return
 
         Log.d(TAG, "Start listening for wake word.")
         isListening = true
@@ -159,7 +189,14 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         )
     }
 
+    private fun stopCurrentListening() {
+        try { speechRecognizer?.cancel() } catch (_: Exception) {}
+        try { speechRecognizer?.stopListening() } catch (_: Exception) {}
+        isListening = false
+    }
+
     private fun scheduleRestart(delayMillis: Long) {
+        if (isPaused) return
         mainHandler.postDelayed({ startListening() }, delayMillis)
     }
 
@@ -405,6 +442,8 @@ class WakeWordForegroundService : Service(), RecognitionListener {
 
     companion object {
         const val ACTION_WAKE_WORD_DETECTED = "com.example.mob.action.WAKE_WORD_DETECTED"
+        const val ACTION_PAUSE_LISTENING = "com.example.mob.action.WAKE_WORD_PAUSE"
+        const val ACTION_RESUME_LISTENING = "com.example.mob.action.WAKE_WORD_RESUME"
         private const val CHANNEL_ID = "wake_word_listener_v2"
         private const val NOTIFICATION_ID = 1001
         private const val WAKE_DETECTED_NOTIFICATION_ID = 1002
@@ -421,6 +460,24 @@ class WakeWordForegroundService : Service(), RecognitionListener {
 
         fun start(context: Context) {
             val intent = Intent(context, WakeWordForegroundService::class.java)
+            launchService(context, intent)
+        }
+
+        fun pauseListening(context: Context) {
+            val intent = Intent(context, WakeWordForegroundService::class.java).apply {
+                action = ACTION_PAUSE_LISTENING
+            }
+            launchService(context, intent)
+        }
+
+        fun resumeListening(context: Context) {
+            val intent = Intent(context, WakeWordForegroundService::class.java).apply {
+                action = ACTION_RESUME_LISTENING
+            }
+            launchService(context, intent)
+        }
+
+        private fun launchService(context: Context, intent: Intent) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

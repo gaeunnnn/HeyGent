@@ -87,14 +87,20 @@ class ChatViewModel : ViewModel() {
     // ─── 세션 관리 ────────────────────────────────────────────────────────────
 
     fun loadSessions() {
-        viewModelScope.launch {
-            _isLoadingSessions.value = true
-            try {
-                val resp = RetrofitClient.aiApiService.getChatSessions()
-                _sessions.value = resp.items
-            } catch (e: Exception) {
-                Log.e("ChatViewModel", "loadSessions 실패: ${e.javaClass.simpleName} ${e.message}", e)
-            }
+        viewModelScope.launch { loadSessionsSuspend() }
+    }
+
+    /** 세션 목록을 동기적으로 로드하고 반환한다 (호출자가 결과를 즉시 필요로 할 때) */
+    suspend fun loadSessionsSuspend(): List<ChatSessionResponse> {
+        _isLoadingSessions.value = true
+        return try {
+            val resp = RetrofitClient.aiApiService.getChatSessions()
+            _sessions.value = resp.items
+            resp.items
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "loadSessions 실패: ${e.javaClass.simpleName} ${e.message}", e)
+            emptyList()
+        } finally {
             _isLoadingSessions.value = false
         }
     }

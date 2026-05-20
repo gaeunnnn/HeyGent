@@ -152,19 +152,35 @@ class InMemoryTaskRepository:
     def count_tasks(self, *, status: str | None = None, session_key: str | None = None) -> int:
         return len(self._filter_tasks(statuses=[status] if status else None, session_key=session_key))
 
-    def list_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None, limit: int = 50, offset: int = 0) -> list[TaskRun]:
-        tasks = self._filter_tasks(statuses=statuses, session_key=session_key)
+    def list_tasks_by_statuses(
+        self,
+        statuses: list[str],
+        *,
+        session_key: str | None = None,
+        owner_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[TaskRun]:
+        tasks = self._filter_tasks(statuses=statuses, session_key=session_key, owner_key=owner_key)
         return deepcopy(tasks[offset : offset + limit])
 
-    def count_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None) -> int:
-        return len(self._filter_tasks(statuses=statuses, session_key=session_key))
+    def count_tasks_by_statuses(self, statuses: list[str], *, session_key: str | None = None, owner_key: str | None = None) -> int:
+        return len(self._filter_tasks(statuses=statuses, session_key=session_key, owner_key=owner_key))
 
-    def _filter_tasks(self, *, statuses: list[str] | None = None, session_key: str | None = None) -> list[TaskRun]:
+    def _filter_tasks(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        session_key: str | None = None,
+        owner_key: str | None = None,
+    ) -> list[TaskRun]:
         status_set = set(statuses or [])
         tasks = [
             task
             for task in self.tasks.values()
-            if (not status_set or task.status in status_set) and (session_key is None or task.session_key == session_key)
+            if (not status_set or task.status in status_set)
+            and (session_key is None or task.session_key == session_key)
+            and (owner_key is None or str(task.owner_key) == str(owner_key))
         ]
         return sorted(tasks, key=lambda task: task.created_at or utc_now(), reverse=True)
 
@@ -365,6 +381,7 @@ class InMemoryTranscriptStore:
         offset: int = 0,
         include_archived: bool = False,
         include_deleted: bool = False,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
         effective_owner = owner if owner is not None else user_id
         sessions = [
@@ -372,12 +389,39 @@ class InMemoryTranscriptStore:
             for session in self.sessions.values()
             if effective_owner is None or session.get("user_id") == effective_owner
         ]
+        if source is not None:
+            sessions = [
+                session
+                for session in sessions
+                if session.get("source") == source or dict(session.get("metadata") or {}).get("source") == source
+            ]
         if not include_deleted:
             sessions = [session for session in sessions if session.get("deleted_at") is None]
         if not include_archived:
             sessions = [session for session in sessions if session.get("archived_at") is None]
         sessions.sort(key=lambda session: session["updated_at"], reverse=True)
         return deepcopy(sessions[offset : offset + limit])
+
+    def count_sessions(
+        self,
+        owner: str | None = None,
+        *,
+        user_id: str | None = None,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        source: str | None = None,
+    ) -> int:
+        return len(
+            self.list_sessions(
+                owner,
+                user_id=user_id,
+                limit=10_000_000,
+                offset=0,
+                include_archived=include_archived,
+                include_deleted=include_deleted,
+                source=source,
+            )
+        )
 
     def get_latest_session_by_key(self, session_key: str, *, owner: str | None = None) -> dict[str, Any] | None:
         sessions = [
@@ -697,6 +741,80 @@ class InMemorySkillRepository:
     def get_user_skill_detail(self, *, owner_key: str, skill_id: str) -> dict[str, Any] | None:
         item = self.get_user_skill(owner_key=owner_key, skill_id=skill_id)
         return dict(item) if item is not None else None
+
+    def create_custom_skill(
+        self,
+        *,
+        owner_key: str,
+        owner_user_id: int | None,
+        name: str,
+        display_name: str,
+        description: str,
+        body: str,
+        documents: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        skill_id = f"custom:{owner_key}:{name}"
+        self.catalog[skill_id] = {
+            "skill_id": skill_id,
+            "name": name,
+            "display_name": display_name,
+            "description": description,
+            "source_type": "custom",
+            "source_path": f"custom://{skill_id}/SKILL.md",
+            "version": 1,
+            "default_enabled": True,
+            "enabled": True,
+            "metadata": {"ownerKey": owner_key, "hasBody": bool(body.strip())},
+            "config_snapshot": {},
+            "body": body,
+            "files": ["SKILL.md", *[str(document.get("documentKey") or "") for document in documents or []]],
+            "documents": [
+                {
+                    "document_key": "SKILL.md",
+                    "title": "기본 지침",
+                    "content": body,
+                    "content_format": "markdown",
+                },
+                *[
+                    {
+                        "document_key": str(document.get("documentKey") or ""),
+                        "title": str(document.get("title") or ""),
+                        "content": str(document.get("content") or ""),
+                        "content_format": "markdown",
+                    }
+                    for document in documents or []
+                ],
+            ],
+        }
+        self.user_settings[(owner_key, skill_id)] = True
+        return self.get_user_skill_detail(owner_key=owner_key, skill_id=skill_id) or self.catalog[skill_id]
+
+    def delete_custom_skill(self, *, owner_key: str, skill_id: str) -> dict[str, Any] | None:
+        item = self.get_user_skill(owner_key=owner_key, skill_id=skill_id)
+        if item is None or item.get("source_type") != "custom":
+            return None
+        removed = self.catalog.pop(skill_id, None)
+        if removed is None:
+            return None
+        for key in list(self.user_settings):
+            if key[1] == skill_id:
+                self.user_settings.pop(key, None)
+        for profile_id, skill_ids in list(self.agent_settings.items()):
+            self.agent_settings[profile_id] = [item for item in skill_ids if item != skill_id]
+        return dict(item)
+
+    def list_runtime_custom_skills(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": str(item.get("name") or ""),
+                "description": str(item.get("description") or ""),
+                "path": str(item.get("source_path") or ""),
+                "body": str(item.get("body") or ""),
+                "metadata": dict(item.get("metadata") or {}),
+            }
+            for item in self.catalog.values()
+            if item.get("source_type") == "custom"
+        ]
 
     def set_agent_skill_settings(self, *, profile_id: str, skill_ids: list[str]) -> None:
         self.agent_settings[profile_id] = [skill_id for skill_id in dict.fromkeys(skill_ids) if skill_id in self.catalog]

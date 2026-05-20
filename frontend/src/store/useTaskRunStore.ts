@@ -854,25 +854,8 @@ const normalizeRealtimeStepRunStatus = (
 }
 
 const inferRealtimeStepRunTitle = (event: RawTaskEventPayload) =>
-  (event.event_type.startsWith('step.')
-    ? getMeaningfulTaskEventSummary(event.summary_message)
-    : undefined) ??
-  pickTaskEventString(event.payload, ['step_title', 'stepTitle', 'goal']) ??
-  pickTaskEventString(event.detail_json, ['step_title', 'stepTitle', 'goal']) ??
-  getRealtimeStepRunFallbackTitle(event.event_type)
-
-const getMeaningfulTaskEventSummary = (value?: string | null) => {
-  const text = typeof value === 'string' ? value.trim() : ''
-  if (
-    text === '' ||
-    text === '답변을 준비하는 중입니다.' ||
-    text === '답변 준비 중' ||
-    text === '작업 중'
-  ) {
-    return undefined
-  }
-  return text
-}
+  pickTaskEventString(event.payload, ['step_title', 'stepTitle', 'title']) ??
+  pickTaskEventString(event.detail_json, ['step_title', 'stepTitle', 'title'])
 
 const pickTaskEventString = (value: unknown, keys: string[]) => {
   if (!isJsonObject(value)) {
@@ -990,16 +973,6 @@ const withoutTaskRunActivityProjection = (
   const next = { ...current }
   delete next[taskRunId]
   return next
-}
-
-const getRealtimeStepRunFallbackTitle = (eventType: string) => {
-  if (eventType.startsWith('tool.')) {
-    return '도구 실행'
-  }
-  if (eventType.startsWith('search.')) {
-    return '자료 확인'
-  }
-  return '답변 진행 단계'
 }
 
 const isStepRunStartEvent = (eventType: string) =>

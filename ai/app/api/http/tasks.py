@@ -291,14 +291,15 @@ def _build_task_response(task, context: TaskContext) -> TaskRunResponse:
 def _has_active_task_for_owner_session(context: TaskContext, *, owner_key: str, session_key: str) -> bool:
     """sessionId 중복 실행 제한은 인증 owner 범위 안에서만 적용한다."""
 
-    active_total = context.repository.count_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_key)
+    active_total = context.repository.count_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_key, owner_key=owner_key)
     active_tasks = context.repository.list_tasks_by_statuses(
         _ACTIVE_TASK_STATUSES,
         session_key=session_key,
+        owner_key=owner_key,
         limit=max(active_total, 1),
         offset=0,
     )
-    return any(str(task.owner_key) == str(owner_key) for task in active_tasks)
+    return bool(active_tasks)
 
 
 def _recent_task_reference_time(task):
@@ -559,13 +560,21 @@ async def list_active_tasks(
         else {}
     )
 
-    active_total_count = context.repository.count_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_key)
-    active_tasks = context.repository.list_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_key, limit=max(active_total_count, 1), offset=0)
+    owner_key = str(user.user_id) if user is not None else None
+    active_total_count = context.repository.count_tasks_by_statuses(_ACTIVE_TASK_STATUSES, session_key=session_key, owner_key=owner_key)
+    active_tasks = context.repository.list_tasks_by_statuses(
+        _ACTIVE_TASK_STATUSES,
+        session_key=session_key,
+        owner_key=owner_key,
+        limit=max(active_total_count, 1),
+        offset=0,
+    )
 
-    recent_total_pool = context.repository.count_tasks_by_statuses(_RECENT_TERMINAL_TASK_STATUSES, session_key=session_key)
+    recent_total_pool = context.repository.count_tasks_by_statuses(_RECENT_TERMINAL_TASK_STATUSES, session_key=session_key, owner_key=owner_key)
     recent_candidates = context.repository.list_tasks_by_statuses(
         _RECENT_TERMINAL_TASK_STATUSES,
         session_key=session_key,
+        owner_key=owner_key,
         limit=max(recent_total_pool, 1),
         offset=0,
     )

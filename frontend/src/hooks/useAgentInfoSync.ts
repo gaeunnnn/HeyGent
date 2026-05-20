@@ -5,6 +5,7 @@ import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import { useAgentVisualizationStore } from '@/store/useAgentVisualizationStore'
 import { useTaskRunStore } from '@/store/useTaskRunStore'
 import type { AgentPanelItem } from '@/store/useSessionStore'
+import { pickCurrentVisualizationTask } from '@/utils/agentCurrentTask'
 import type { RawStepRun, RawTaskRun } from '@/types/taskRuns'
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'CANCELLED'])
@@ -46,18 +47,6 @@ function getStepRunEndedAt(stepRun: RawStepRun): string | undefined {
   return undefined
 }
 
-// 백엔드는 goal을 StepRunResponse.semantic.goal에 중첩해서 제공한다.
-function getStepRunGoal(stepRun: RawStepRun): string {
-  if (typeof stepRun.goal === 'string') return stepRun.goal
-  const raw = stepRun as Record<string, unknown>
-  const semantic = raw.semantic
-  if (typeof semantic === 'object' && semantic !== null) {
-    const goal = (semantic as Record<string, unknown>).goal
-    if (typeof goal === 'string') return goal
-  }
-  return ''
-}
-
 // profileIdMap(profileId → spriteId)을 사용해 actorAgent를 spriteId로 해석한다.
 // useVisualizationSync의 resolveProfileKey와 동일한 우선순위로 처리한다.
 function resolveTaskRunSpriteId(
@@ -80,41 +69,6 @@ function resolveSessionTaskRunSpriteId(
     resolveTaskRunSpriteId(taskRun, profileIdMap) ??
     (sessionId !== undefined && taskRun.session_id === sessionId ? 'ceo' : null)
   )
-}
-
-function pickCurrentTask(
-  taskRun: RawTaskRun,
-  stepRuns: RawStepRun[],
-): VisualizationTask | undefined {
-  if (TERMINAL_STATUSES.has(taskRun.status?.toUpperCase() ?? '')) return undefined
-
-  const activeStep = stepRuns
-    .filter((sr) => {
-      const status = sr.status?.toUpperCase()
-      return status === 'RUNNING' || status === 'WAITING'
-    })
-    .sort((a, b) => (b.step_order ?? b.stepOrder ?? 0) - (a.step_order ?? a.stepOrder ?? 0))[0]
-
-  if (activeStep) {
-    return {
-      taskId: activeStep.step_run_id,
-      title: activeStep.title ?? taskRun.title ?? '작업 진행 중',
-      description: getStepRunGoal(activeStep),
-      status: 'in_progress',
-      startedAt: activeStep.started_at ?? undefined,
-    }
-  }
-
-  const status = taskRun.status?.toUpperCase()
-  if (!status || status === 'PENDING') return undefined
-
-  return {
-    taskId: taskRun.task_run_id,
-    title: taskRun.title ?? '작업 진행 중',
-    description: '',
-    status: toTaskStatus(taskRun.status),
-    startedAt: taskRun.created_at ?? undefined,
-  }
 }
 
 function pickTaskHistory(taskRun: RawTaskRun, stepRuns: RawStepRun[]): VisualizationTask[] {
@@ -174,6 +128,7 @@ export function useAgentInfoSync(
   const stepRunsById = useTaskRunStore((s) => s.stepRunsById)
   const fetchSessionTaskRuns = useTaskRunStore((s) => s.fetchSessionTaskRuns)
   const fetchSnapshot = useTaskRunStore((s) => s.fetchSnapshot)
+  const agentInfoMap = useAgentVisualizationStore((s) => s.agentInfoMap)
   const updateAgentInfo = useAgentVisualizationStore((s) => s.updateAgentInfo)
   const selectedAgentId = useAgentVisualizationStore((s) => s.selectedAgentId)
   const fetchedTaskRunIds = useRef<Set<string>>(new Set())
@@ -249,22 +204,29 @@ export function useAgentInfoSync(
 
   // profileIdMap이 늦게 채워지거나 agentPanels(이름·역할 등)가 바뀌면 agentInfoMap을 갱신한다.
   // agentPanels의 최신 값을 캐시 데이터보다 우선 적용해 사이드바 수정이 즉시 반영되도록 한다.
+  // 신규 추가 에이전트(API 캐시 미적재)는 agentPanels 데이터로 즉시 반영한다.
   useEffect(() => {
     if (!profileIdMap) return
     for (const [profileId, spriteId] of Object.entries(profileIdMap)) {
       const cachedData = cachedProfilesRef.current.get(profileId)
-      if (!cachedData) continue
       const panel = agentPanels?.find((p) => p.agent.profileId === profileId)
-      const profileData: typeof cachedData = panel
+      if (!cachedData && !panel) continue
+      const baseData: CachedSubAgentProfile = cachedData ?? {
+        name: panel!.agent.name,
+        role: panel!.agent.role ?? '',
+        skills: panel!.agent.skills ?? [],
+        ...(panel!.agent.profileImage ? { profileImage: panel!.agent.profileImage } : {}),
+      }
+      const profileData: CachedSubAgentProfile = panel
         ? {
-            ...cachedData,
+            ...baseData,
             name: panel.agent.name,
-            role: panel.agent.role ?? cachedData.role,
+            role: panel.agent.role ?? baseData.role,
             ...(panel.agent.profileImage !== undefined
               ? { profileImage: panel.agent.profileImage ?? undefined }
               : {}),
           }
-        : cachedData
+        : baseData
       updateAgentInfo(spriteId, profileData)
     }
   }, [profileIdMap, updateAgentInfo, agentPanels])
@@ -290,9 +252,14 @@ export function useAgentInfoSync(
       const agentStepRuns = Object.values(stepRunsById).filter(
         (sr) => sr.task_run_id === taskRun.task_run_id,
       )
-      const currentTask = pickCurrentTask(taskRun, agentStepRuns)
-      const taskHistory = pickTaskHistory(taskRun, agentStepRuns)
       const update = updatesBySpriteId.get(spriteId)
+      const previousCurrentTask = update?.currentTask ?? agentInfoMap[spriteId]?.currentTask
+      const currentTask = pickCurrentVisualizationTask({
+        taskRun,
+        stepRuns: agentStepRuns,
+        previousCurrentTask,
+      })
+      const taskHistory = pickTaskHistory(taskRun, agentStepRuns)
 
       if (update === undefined) {
         updatesBySpriteId.set(spriteId, {
@@ -308,6 +275,9 @@ export function useAgentInfoSync(
           update.taskHistory.push(task)
         }
       }
+      if (update.currentTask === undefined && currentTask !== undefined) {
+        update.currentTask = currentTask
+      }
     }
 
     for (const [spriteId, update] of updatesBySpriteId) {
@@ -320,7 +290,7 @@ export function useAgentInfoSync(
         ...(update.taskHistory.length > 0 ? { taskHistory: update.taskHistory.slice(0, 5) } : {}),
       })
     }
-  }, [sessionId, taskRunsById, stepRunsById, updateAgentInfo, profileIdMap])
+  }, [sessionId, taskRunsById, stepRunsById, updateAgentInfo, profileIdMap, agentInfoMap])
 
   useEffect(() => {
     if (!selectedAgentId) return

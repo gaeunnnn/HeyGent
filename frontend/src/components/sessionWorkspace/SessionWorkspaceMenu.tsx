@@ -352,7 +352,7 @@ export function SessionWorkspaceMenu({
         </div>
 
         <section>
-          <SectionHeader label="팀장 에이전트" />
+          <SectionHeader label="메인 에이전트" />
           <div className="group/main relative flex items-center">
             {editingMainAgent ? (
               <div
@@ -361,7 +361,7 @@ export function SessionWorkspaceMenu({
                 }`}
               >
                 <img
-                  src="/assets/agents/ceo/ceo_profile.png"
+                  src="/assets/agents/ceo/ceo_profile_img.png"
                   alt="팀장"
                   draggable={false}
                   className="h-6 w-6 shrink-0 object-contain"
@@ -394,7 +394,7 @@ export function SessionWorkspaceMenu({
                 }`}
               >
                 <img
-                  src="/assets/agents/ceo/ceo_profile.png"
+                  src="/assets/agents/ceo/ceo_profile_img.png"
                   alt="팀장"
                   draggable={false}
                   className="h-6 w-6 shrink-0 object-contain"
@@ -402,35 +402,18 @@ export function SessionWorkspaceMenu({
                 <span className="truncate">{mainAgentName}</span>
               </button>
             )}
-            {session !== null && (
+            {session !== null && editingMainAgent && (
               <button
                 type="button"
-                onMouseDown={(event) => {
-                  if (editingMainAgent) {
-                    event.preventDefault()
-                  }
-                }}
-                onClick={() => {
-                  if (editingMainAgent) {
-                    void handleSaveMainAgentName()
-                  } else {
-                    setMainAgentDraft(mainAgentName)
-                    setEditingMainAgent(true)
-                  }
-                }}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => void handleSaveMainAgentName()}
                 className="text-muted-foreground hover:bg-accent/50 hover:text-foreground absolute top-1/2 right-1 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg transition-colors"
-                aria-label={
-                  editingMainAgent
-                    ? '팀장 에이전트 이름 저장'
-                    : `${mainAgentName} 팀장 에이전트 이름 편집`
-                }
+                aria-label="메인 에이전트 이름 저장"
               >
                 {mainAgentSaving ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
-                ) : editingMainAgent ? (
-                  <Check className="h-4 w-4" />
                 ) : (
-                  <Edit3 className="h-4 w-4" />
+                  <Check className="h-4 w-4" />
                 )}
               </button>
             )}
@@ -444,9 +427,8 @@ export function SessionWorkspaceMenu({
               onClick={() => onSelectPanel('subAgents')}
               className="flex min-w-0 flex-1 items-center gap-1 rounded-lg px-2.5 py-1.5 text-left"
             >
-              <ChevronRight className="text-muted-foreground/60 h-3 w-3 opacity-0 transition-opacity group-hover:opacity-100" />
-              <span className="text-muted-foreground/60 font-mono text-[10px] font-medium tracking-widest uppercase">
-                에이전트
+              <span className="text-muted-foreground text-xs font-semibold tracking-wide">
+                서브 에이전트
               </span>
             </button>
             <button
@@ -584,9 +566,7 @@ function getMainAgentName(session: RawAiSession | null) {
 function SectionHeader({ label }: { label: string }) {
   return (
     <div className="px-3 py-1.5">
-      <span className="text-muted-foreground/60 font-mono text-[10px] font-medium tracking-widest uppercase">
-        {label}
-      </span>
+      <span className="text-muted-foreground text-xs font-semibold tracking-wide">{label}</span>
     </div>
   )
 }

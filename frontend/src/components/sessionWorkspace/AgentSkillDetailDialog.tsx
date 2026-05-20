@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { ChevronRight, FileText, Folder, FolderOpen, Loader2 } from 'lucide-react'
+import { ChevronRight, FileText, Folder, FolderOpen, Loader2, Trash2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -22,11 +23,13 @@ type SkillDocumentTreeNode = {
 export function AgentSkillDetailDialog({
   detail,
   loading,
+  onDelete,
   onOpenChange,
   open,
 }: {
   detail: SkillCatalogDetail | null
   loading: boolean
+  onDelete?: (detail: SkillCatalogDetail) => Promise<void>
   onOpenChange: (open: boolean) => void
   open: boolean
 }) {
@@ -34,6 +37,9 @@ export function AgentSkillDetailDialog({
   const documentTree = useMemo(() => buildSkillDocumentTree(documents), [documents])
   const [selectedDocumentKeyDraft, setSelectedDocumentKeyDraft] = useState<string | null>(null)
   const [closedFolderKeys, setClosedFolderKeys] = useState<Set<string>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const canDelete = detail?.sourceType === 'custom' && onDelete !== undefined
   const selectedDocumentKey = documents.some(
     (document) => document.documentKey === selectedDocumentKeyDraft,
   )
@@ -43,14 +49,54 @@ export function AgentSkillDetailDialog({
     (document) => document.documentKey === selectedDocumentKey,
   )
 
+  const handleDelete = async () => {
+    if (!detail || !canDelete || deleting) return
+    const confirmed = window.confirm(
+      '이 스킬을 삭제할까요? 연결된 에이전트에서도 이 스킬이 빠집니다.',
+    )
+    if (!confirmed) return
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await onDelete(detail)
+      onOpenChange(false)
+    } catch {
+      setDeleteError('스킬을 삭제하지 못했습니다.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[86vh] max-w-5xl overflow-hidden p-0">
-        <DialogHeader className="border-border border-b px-5 py-4">
-          <DialogTitle>{detail?.displayName ?? '스킬 상세'}</DialogTitle>
-          <DialogDescription className="line-clamp-3">
-            {detail?.description ?? '스킬 문서를 확인합니다.'}
-          </DialogDescription>
+        <DialogHeader className="border-border selectable-text border-b px-5 py-4">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <DialogTitle>{detail?.displayName ?? '스킬 상세'}</DialogTitle>
+              <DialogDescription className="line-clamp-3">
+                {detail?.description ?? '스킬 문서를 확인합니다.'}
+              </DialogDescription>
+            </div>
+            {canDelete ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="text-destructive hover:text-destructive shrink-0"
+                onClick={() => void handleDelete()}
+                disabled={deleting || loading}
+              >
+                {deleting ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                삭제
+              </Button>
+            ) : null}
+          </div>
+          {deleteError ? <p className="text-destructive pt-2 text-xs">{deleteError}</p> : null}
         </DialogHeader>
 
         {loading ? (
@@ -95,7 +141,7 @@ export function AgentSkillDetailDialog({
                   {selectedDocument?.title ?? '문서 없음'}
                 </span>
               </div>
-              <div className="h-[calc(68vh-2.5rem)] overflow-y-auto px-5 py-4">
+              <div className="selectable-text h-[calc(68vh-2.5rem)] overflow-y-auto px-5 py-4">
                 {selectedDocument?.content ? (
                   <div className="prose prose-sm dark:prose-invert max-w-none">
                     <ChatMarkdown content={selectedDocument.content} />

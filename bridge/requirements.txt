@@ -2,3 +2,4 @@ websockets>=12.0
 pystray>=0.19
 Pillow>=10.0
 customtkinter>=5.2
+# AppContainer 샌드박스는 ctypes + Win32 만 쓰므로 추가 패키지 없음 (Windows 표준 시스템 DLL 호출).

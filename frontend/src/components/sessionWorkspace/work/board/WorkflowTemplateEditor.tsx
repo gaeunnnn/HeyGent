@@ -34,6 +34,7 @@ import {
   type WorkflowTemplateNode as ApiTplNode,
 } from '@/apis/workflowTemplates'
 import { useChatStore } from '@/store/useChatStore'
+import { buildWorkflowRunInputPayload, buildWorkflowRunTrigger } from '@/utils/workflowRunPayload'
 
 type AgentChoice = {
   assigneeAgentId: string | null
@@ -100,10 +101,12 @@ export function WorkflowTemplateEditor({
   assignees,
   sessionId,
   onEnsureDefaultAgents,
+  onEnsureProvidedAgent,
 }: {
   assignees: BoardAssignee[]
   sessionId: string
   onEnsureDefaultAgents: () => Promise<BoardAssignee[]>
+  onEnsureProvidedAgent: (templateKey: string) => Promise<BoardAssignee[]>
 }) {
   return (
     <ReactFlowProvider>
@@ -111,6 +114,7 @@ export function WorkflowTemplateEditor({
         assignees={assignees}
         sessionId={sessionId}
         onEnsureDefaultAgents={onEnsureDefaultAgents}
+        onEnsureProvidedAgent={onEnsureProvidedAgent}
       />
     </ReactFlowProvider>
   )
@@ -120,10 +124,12 @@ function WorkflowTemplateEditorInner({
   assignees,
   sessionId,
   onEnsureDefaultAgents,
+  onEnsureProvidedAgent,
 }: {
   assignees: BoardAssignee[]
   sessionId: string
   onEnsureDefaultAgents: () => Promise<BoardAssignee[]>
+  onEnsureProvidedAgent: (templateKey: string) => Promise<BoardAssignee[]>
 }) {
   // ── 템플릿 목록 ──
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([])
@@ -477,11 +483,22 @@ function WorkflowTemplateEditorInner({
   }
 
   const handleSelectAgent = async (agent: AgentChoice) => {
+    if (agent.provided && agent.templateKey === 'default') {
+      setComposerAgent({
+        ...agent,
+        assigneeAgentId: null,
+      })
+      return
+    }
     if (agent.provided && agent.templateKey) {
       setComposerAgentBusy(true)
       try {
-        const next = await onEnsureDefaultAgents()
-        const matched = next.find((assignee) => assignee.templateKey === agent.templateKey) ?? null
+        let next = await onEnsureDefaultAgents()
+        let matched = next.find((assignee) => assignee.templateKey === agent.templateKey) ?? null
+        if (!matched) {
+          next = await onEnsureProvidedAgent(agent.templateKey)
+          matched = next.find((assignee) => assignee.templateKey === agent.templateKey) ?? null
+        }
         setComposerAgent({
           id: matched?.id ?? agent.id,
           name: matched?.name ?? agent.name,
@@ -636,50 +653,41 @@ function WorkflowTemplateEditorInner({
     }
     setBusyRunning(true)
     try {
-      await instantiateWorkflowTemplate(sessionId, selectedTemplate.templateId)
+      const execution = await instantiateWorkflowTemplate(sessionId, selectedTemplate.templateId)
       toast.success(`"${selectedTemplate.name}" 작업 생성됨`)
       // 팀장 에이전트한테 시작 신호 — 이미 만들어진 자식 작업들을 명시해 위임 유도
       try {
-        const childList = selectedTemplate.graph.nodes
-          .map((n, idx) => {
-            const agentName =
-              assignees.find((a) => a.id === n.assigneeAgentId)?.name ??
-              DEFAULT_AGENT_CHOICES.find((c) => c.templateKey === n.templateKey)?.name ??
-              '에이전트'
-            return `${idx + 1}. [${agentName}] ${n.title}\n   - 지시: ${n.description || n.title}`
-          })
-          .join('\n')
-          .trim()
-
-        const orderList = selectedTemplate.graph.edges
-          .map((e) => {
-            const src =
-              selectedTemplate.graph.nodes.find((n) => n.slotKey === e.sourceSlotKey)?.title ??
-              e.sourceSlotKey
-            const tgt =
-              selectedTemplate.graph.nodes.find((n) => n.slotKey === e.targetSlotKey)?.title ??
-              e.targetSlotKey
-            return `- "${src}" 완료 후 → "${tgt}" 시작`
-          })
-          .join('\n')
-          .trim()
-
-        const trigger = [
-          `[워크플로우 "${selectedTemplate.name}" 실행 시작]`,
-          '',
-          `## 전반 지시`,
-          selectedTemplate.description || selectedTemplate.name,
-          '',
-          `## 이미 생성된 자식 작업 (이 작업들을 그대로 위임/실행하세요. 새 작업 만들지 마세요)`,
-          childList || '(없음)',
-          orderList ? `\n## 실행 순서\n${orderList}` : '',
-          '',
-          '위 자식 작업들을 정의된 순서대로 진행하고, 모든 결과를 종합해 최종 결과를 보고하세요.',
-        ]
-          .filter(Boolean)
-          .join('\n')
-
-        await sendChatMessage({ sessionId, content: trigger })
+        const children = execution.children.map((child) => {
+          const templateNode = selectedTemplate.graph.nodes.find((n) => n.slotKey === child.slotKey)
+          return {
+            slotKey: child.slotKey,
+            workId: child.workId,
+            identifier: child.identifier,
+            title: child.title,
+            description: templateNode?.description ?? child.title,
+            assigneeAgentId: child.assigneeAgentId,
+            assigneeName:
+              assignees.find((a) => a.id === child.assigneeAgentId)?.name ??
+              DEFAULT_AGENT_CHOICES.find((c) => c.templateKey === templateNode?.templateKey)
+                ?.name ??
+              '에이전트',
+          }
+        })
+        const trigger = buildWorkflowRunTrigger({
+          templateName: selectedTemplate.name,
+          templateDescription: selectedTemplate.description,
+          children,
+          edges: selectedTemplate.graph.edges,
+        })
+        const inputPayload = buildWorkflowRunInputPayload({
+          templateId: selectedTemplate.templateId,
+          templateName: selectedTemplate.name,
+          rootWorkId: execution.rootWorkId,
+          childWorkIds: execution.childWorkIds,
+          childrenBySlotKey: execution.childrenBySlotKey,
+          children,
+        })
+        await sendChatMessage({ sessionId, content: trigger, inputPayload })
         toast.success('팀장 에이전트에게 시작 신호 전송됨')
       } catch (chatError) {
         console.error('sendChatMessage failed', chatError)

@@ -56,6 +56,10 @@ RUNTIME_TOOLSETS: dict[str, RuntimeToolsetDefinition] = {
         description="Gmail account proxy execution tools (read updates label, fetch messages, build newsletter digests).",
         tools=("gmail.execute",),
     ),
+    "health": RuntimeToolsetDefinition(
+        description="Authenticated health data proxy execution tools.",
+        tools=("health.execute",),
+    ),
     "design": RuntimeToolsetDefinition(
         description="DESIGN.md preset inspection tools for prototype generation.",
         tools=("design.list_presets", "design.read_preset"),

@@ -270,6 +270,11 @@ async def _main() -> None:
 
 
 def main() -> None:
+    # 콘솔 모드에서도 --sandbox-worker 분기는 동일하게 동작해야 한다.
+    import sys
+    if "--sandbox-worker" in sys.argv[1:]:
+        from bridge import sandbox_worker
+        sys.exit(sandbox_worker.main())
     try:
         asyncio.run(_main())
     except KeyboardInterrupt:

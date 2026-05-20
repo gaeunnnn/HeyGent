@@ -7,6 +7,7 @@ import type {
   TaskStatus,
   VisualizationTask,
 } from '@/components/office/types'
+import { areVisualizationTasksEqual } from '@/utils/agentCurrentTask'
 
 export type { AgentActivityStatus, AgentVisualizationInfo, TaskStatus, VisualizationTask }
 
@@ -615,7 +616,7 @@ function buildRestingSubAgentRuntime(
   }
 }
 
-function playAgentChime() {
+export function playAgentChime() {
   try {
     const ctx = new AudioContext()
     const play = () => {
@@ -639,6 +640,37 @@ function playAgentChime() {
   }
 }
 
+function areAgentVisualizationInfoEqual(
+  left: AgentVisualizationInfo,
+  right: AgentVisualizationInfo,
+): boolean {
+  return (
+    left.agentId === right.agentId &&
+    left.name === right.name &&
+    left.role === right.role &&
+    left.profileImage === right.profileImage &&
+    left.activityStatus === right.activityStatus &&
+    areStringArraysEqual(left.skills, right.skills) &&
+    areVisualizationTasksEqual(left.currentTask, right.currentTask) &&
+    areVisualizationTaskArraysEqual(left.taskHistory, right.taskHistory)
+  )
+}
+
+function areVisualizationTaskArraysEqual(
+  left: VisualizationTask[],
+  right: VisualizationTask[],
+): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  return left.every((task, index) => areVisualizationTasksEqual(task, right[index]))
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  return left.every((value, index) => value === right[index])
+}
+
 export const useAgentVisualizationStore = create<AgentVisualizationState>((set) => ({
   agentInfoMap: {},
   selectedAgentId: null,
@@ -660,7 +692,9 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
         currentTask: undefined,
         taskHistory: [],
       }
-      return { agentInfoMap: { ...state.agentInfoMap, [agentId]: { ...existing, ...updates } } }
+      const next = { ...existing, ...updates }
+      if (areAgentVisualizationInfoEqual(existing, next)) return state
+      return { agentInfoMap: { ...state.agentInfoMap, [agentId]: next } }
     }),
 
   selectAgent: (agentId) => set({ selectedAgentId: agentId }),
@@ -709,9 +743,6 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
 
       const workPosition = CEO_CONFIG.destinations.work!
       const existingCeo = state.agentRuntimes.find((agent) => agent.config.id === 'ceo')
-      if (existingCeo?.state !== 'sitting_work') {
-        playAgentChime()
-      }
       const nextCeo: AgentRuntime = {
         ...(existingCeo ?? {
           config: CEO_CONFIG,
@@ -770,10 +801,6 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
       const baseSpawnedKeys = shouldResetSession ? [] : state.spawnedKeys
       const existingCeo = baseAgents.find((agent) => agent.config.id === 'ceo')
       const workPosition = CEO_CONFIG.destinations.work!
-
-      if (existingCeo?.state !== 'sitting_work') {
-        playAgentChime()
-      }
 
       const nextCeo: AgentRuntime = {
         ...(existingCeo ?? {
@@ -842,19 +869,6 @@ export const useAgentVisualizationStore = create<AgentVisualizationState>((set) 
 
   settleCeoAtDesk: (taskRunId) =>
     set((state) => {
-      const ceo = state.agentRuntimes.find((agent) => agent.config.id === 'ceo')
-      const deskPosition = ceo?.config.destinations.desk
-      const alreadyAtDesk =
-        ceo !== undefined &&
-        deskPosition !== undefined &&
-        ceo.state === 'sitting_desk' &&
-        Math.abs(ceo.position.x - deskPosition.x) < 1 &&
-        Math.abs(ceo.position.y - deskPosition.y) < 1
-
-      if (ceo !== undefined && !alreadyAtDesk) {
-        playAgentChime()
-      }
-
       return {
         activeCeoTaskRunId:
           taskRunId !== undefined &&
