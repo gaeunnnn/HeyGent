@@ -33,6 +33,8 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class MattermostService {
 
+    static final String HEYGENT_MESSAGE_HEADER = "# :ai: HeyGent에서 온 메시지 입니다 :ai:";
+
     private final RestTemplate restTemplate = new RestTemplate();
     private final MattermostChannelRepository mattermostChannelRepository;
     private final UserRepository userRepository;
@@ -132,12 +134,20 @@ public class MattermostService {
             headers.setContentType(MediaType.APPLICATION_JSON);
             restTemplate.postForEntity(
                     webhookUri,
-                    new HttpEntity<>(Map.of("text", message.trim()), headers),
+                    new HttpEntity<>(Map.of("text", withHeygentHeader(message)), headers),
                     String.class
             );
         } catch (RestClientException | IllegalArgumentException exception) {
             throw new CustomException(ErrorCode.MATTERMOST_REQUEST_FAILED);
         }
+    }
+
+    static String withHeygentHeader(String message) {
+        String trimmed = message.trim();
+        if (trimmed.startsWith(HEYGENT_MESSAGE_HEADER)) {
+            return trimmed;
+        }
+        return HEYGENT_MESSAGE_HEADER + "\n\n" + trimmed;
     }
 
     private MattermostChannel findChannel(Long userId, Long channelId) {
