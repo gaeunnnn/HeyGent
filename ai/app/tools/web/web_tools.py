@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.tools.runtime.catalog import register_runtime_tool_definition
+
+
+logger = logging.getLogger("app.tools.web")
 
 
 HTTP_GET_SCHEMA = {
@@ -49,6 +53,9 @@ def http_get_handler(args: dict[str, Any]) -> dict[str, Any]:
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}{query}"
 
+    # http_get 은 urllib 을 쓰므로 httpx 처럼 자동 로그가 안 남는다. 도구가 실제 외부 호출을
+    # 했는지 디버깅하려고 호출 URL 을 명시적으로 남긴다.
+    logger.info("http_get → %s", url)
     request = Request(url, headers={"User-Agent": "heygent-ai/1.0"})
     with urlopen(request, timeout=15) as response:
         raw = response.read(200_000)
@@ -56,6 +63,7 @@ def http_get_handler(args: dict[str, Any]) -> dict[str, Any]:
         text = raw.decode(charset, errors="replace")
         content_type = response.headers.get("content-type", "")
         status = int(response.status)
+    logger.info("http_get ← %s status=%s", url, status)
 
     result: dict[str, Any] = {
         "ok": True,

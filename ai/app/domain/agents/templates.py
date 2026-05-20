@@ -28,6 +28,7 @@ K_SERVICE_SKILL_IDS = (
     "han-river-water-level",
     "seoul-subway-arrival",
     "real-estate-search",
+    "korean-stock-search",
     "zipcode-search",
     "geeknews-search",
     "korean-character-count",
