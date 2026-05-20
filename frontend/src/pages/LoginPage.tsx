@@ -161,8 +161,8 @@ function inCopySZ(px: number, py: number, W: number, H: number): boolean {
 const EDGE_SOFT = 70
 const LOGO_SAFE_WIDTH = 190
 const LOGO_SAFE_HEIGHT = 110
-const LOGIN_PANEL_BOTTOM = 72
-const LOGIN_SINK_CENTER_OFFSET = 58
+const LOGIN_PANEL_BOTTOM = 104
+const LOGIN_SINK_CENTER_OFFSET = 24
 
 function getLoginSink(W: number, H: number): Point2D {
   return { x: W * 0.5, y: H - LOGIN_PANEL_BOTTOM - LOGIN_SINK_CENTER_OFFSET }
@@ -1736,7 +1736,13 @@ export function LoginPage() {
                   }}
                 >
                   {before && <span style={{ color: 'rgba(240,240,242,0.22)' }}>{before}</span>}
-                  <span style={{ color: 'rgba(240,240,242,0.66)' }}>{accent}</span>
+                  <span
+                    style={{
+                      color: key === 'for' ? 'rgba(240,240,242,0.24)' : 'rgba(240,240,242,0.66)',
+                    }}
+                  >
+                    {accent}
+                  </span>
                   <span style={{ color: 'rgba(240,240,242,0.24)' }}>{after}</span>
                 </span>
               ))}
@@ -1745,6 +1751,24 @@ export function LoginPage() {
         </div>
 
         {/* Login reveal — 점이 사라진 직후 부드럽게 등장 */}
+        <div
+          style={{
+            position: 'fixed',
+            left: '50%',
+            bottom: LOGIN_PANEL_BOTTOM - 22,
+            width: 380,
+            height: 126,
+            transform: `translateX(-50%) translateY(${loginTranslateY}px)`,
+            opacity: loginOpacity,
+            zIndex: 14,
+            pointerEvents: 'none',
+            background:
+              'radial-gradient(ellipse 58% 44% at 50% 56%, #0B0B0D 0%, #0B0B0D 42%, rgba(11,11,13,0.84) 62%, rgba(11,11,13,0) 100%)',
+            transition: 'opacity 0.45s ease-out, transform 0.45s ease-out',
+          }}
+          aria-hidden="true"
+        />
+
         <div
           style={{
             position: 'fixed',
