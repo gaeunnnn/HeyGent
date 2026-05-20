@@ -105,28 +105,21 @@ class BridgeTrayApp:
 
     @classmethod
     def _render_icon(cls, *, connected: bool) -> Image.Image:
+        # 연결 상태 오버레이(빨강/초록 점)는 의도적으로 제거. WebSocket 일시 끊김 같은 transient
+        # 상황에서 빨강이 잠깐씩 떠 사용자에게 잘못된 신호를 줬다. 메뉴의 텍스트 상태 라벨만 신뢰.
         size = 64
         base = cls._get_logo_base()
         if base is not None:
-            # 로고 위에 작은 상태 점(초록/빨강)을 오버레이해서 연결됨/끊김을 구분한다.
-            image = base.copy()
-            draw = ImageDraw.Draw(image)
-            dot_color = (40, 180, 80, 255) if connected else (200, 50, 50, 255)
-            # 오른쪽 아래 모서리에 작은 원.
-            r = 12
-            x0 = size - r * 2 - 2
-            y0 = size - r * 2 - 2
-            draw.ellipse((x0, y0, x0 + r * 2, y0 + r * 2), fill=dot_color, outline=(0, 0, 0, 200), width=1)
-            return image
+            return base.copy()
 
-        # 로고가 없으면 기존 글자 방식으로 폴백.
         image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        color = (40, 180, 80, 255) if connected else (200, 50, 50, 255)
         try:
             font = ImageFont.truetype("arialbd.ttf", 52)
         except OSError:
             font = ImageFont.load_default()
+        # 단색 H 로고 폴백. 상태 색 분기 제거.
+        color = (200, 200, 200, 255)
         bbox = draw.textbbox((0, 0), "H", font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
@@ -139,12 +132,31 @@ class BridgeTrayApp:
         return pystray.Menu(
             pystray.MenuItem(self._status_label, None, enabled=False),
             pystray.MenuItem(self._workspace_label, None, enabled=False),
+            pystray.MenuItem(self._sandbox_label, None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("워크스페이스 열기", self._open_workspace),
             pystray.MenuItem("워크스페이스 변경…", self._change_workspace),
             pystray.MenuItem("이 디바이스 페어링 해제", self._unpair_local),
             pystray.MenuItem("종료", self._quit),
         )
+
+    def _sandbox_label(self, _icon: pystray.Icon) -> str:
+        try:
+            from bridge import executor, sandbox
+            worker = executor.worker_status()
+            status = sandbox.status_summary()
+        except Exception:
+            return "보안: (확인 불가)"
+        if not status.get("supported"):
+            return f"⚠️ 샌드박스 비활성: {status.get('reason') or 'unknown'}"
+        # 워커가 떠 있을 때 실제 격리 여부를 표시.
+        if worker.get("running"):
+            return (
+                "🔒 AppContainer 격리: 활성 (워커 동작 중)"
+                if worker.get("sandboxed")
+                else "🔓 워커 분리만 활성 — AppContainer 격리 폴백"
+            )
+        return "🔒 AppContainer 프로필 준비됨 (워커 대기)"
 
     def _change_workspace(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         """실행 중에 워크스페이스 폴더를 변경한다.
@@ -263,6 +275,7 @@ class BridgeTrayApp:
 
         unpair_requested 플래그는 호출 측이 미리 세팅한다. 여기서는 단지 멈추기만 한다.
         icon.visible=False 를 명시해 윈도우 알림 영역에서 아이콘이 즉시 사라지도록 한다.
+        샌드박스 워커도 같이 정리해서 좀비 자식이 남지 않게 한다.
         """
 
         try:
@@ -271,6 +284,11 @@ class BridgeTrayApp:
             pass
         if self._loop is not None and self._stop_event is not None:
             self._loop.call_soon_threadsafe(self._stop_event.set)
+        try:
+            from bridge import executor
+            executor.shutdown_worker()
+        except Exception:
+            logger.exception("샌드박스 워커 정리 실패 (무시)")
         icon.stop()
 
     def _set_connected(self, value: bool) -> None:
@@ -373,12 +391,43 @@ def _show_startup_dialog(settings: BridgeSettings) -> BridgeSettings | None:
         font=ctk.CTkFont(family="맑은 고딕", size=12),
         text_color="#9ca3af",
     )
-    subtitle.pack(pady=(0, 14))
+    subtitle.pack(pady=(0, 6))
+
+    # ── 샌드박스 상태 라벨 ──
+    # AppContainer 가 켜졌는지 사용자에게 명확히 알려줘서, 다운받은 .exe 가 실제 격리 환경에서
+    # 돈다는 사실을 신뢰할 수 있도록 한다. 발표용 데모에서도 이 라벨을 가리키며 설명한다.
+    sandbox_supported = _sandbox_supported()
+    sandbox_label = ctk.CTkLabel(
+        root,
+        text=(
+            "🔒 AppContainer 샌드박스로 보호됨 — 워크스페이스 외부 접근은 OS 단에서 차단됩니다."
+            if sandbox_supported
+            else "⚠️ 이 환경에서는 AppContainer 가 비활성입니다 (Windows 10 1709+ 필요)."
+        ),
+        font=ctk.CTkFont(family="맑은 고딕", size=11),
+        text_color="#22c55e" if sandbox_supported else "#f59e0b",
+    )
+    sandbox_label.pack(padx=24, pady=(0, 10))
+
+    # ── 워크스페이스 (위로 올림) ──
+    workspace_frame = ctk.CTkFrame(root, fg_color="transparent")
+    workspace_frame.pack(padx=24, fill="x", pady=(0, 4))
+    ctk.CTkLabel(workspace_frame, text="워크스페이스 폴더", width=110, anchor="w").pack(side="left")
+    path_var = ctk.StringVar(value=str(settings.workspace_root) if settings.workspace_root else "")
+    path_entry = ctk.CTkEntry(workspace_frame, textvariable=path_var, font=ctk.CTkFont(family="Consolas", size=10), height=30)
+    path_entry.pack(side="left", padx=(6, 6), fill="x", expand=True)
+
+    def _browse() -> None:
+        new = filedialog.askdirectory(title="워크스페이스 폴더 선택", initialdir=path_var.get())
+        if new:
+            path_var.set(str(Path(new).resolve()))
+
+    ctk.CTkButton(workspace_frame, text="찾기", command=_browse, width=70, height=30, fg_color="#374151", hover_color="#4b5563").pack(side="left")
 
     # ── 환경 선택 ──
     env_var = ctk.StringVar(value=settings.environment_key)
     env_frame = ctk.CTkFrame(root, fg_color="transparent")
-    env_frame.pack(padx=24, fill="x")
+    env_frame.pack(padx=24, fill="x", pady=(10, 0))
     ctk.CTkLabel(env_frame, text="환경", width=70, anchor="w").pack(side="left")
     for env in environments.ALL:
         ctk.CTkRadioButton(env_frame, text=env.label, variable=env_var, value=env.key).pack(side="left", padx=8)
@@ -391,7 +440,7 @@ def _show_startup_dialog(settings: BridgeSettings) -> BridgeSettings | None:
         font=ctk.CTkFont(family="맑은 고딕", size=12),
         text_color="#22c55e" if settings.is_paired else "#f59e0b",
     )
-    pair_status_label.pack(padx=24, anchor="w", pady=(14, 6))
+    pair_status_label.pack(padx=24, anchor="w", pady=(10, 6))
 
     code_var = ctk.StringVar()
     name_var = ctk.StringVar(value=settings.device_name or "")
@@ -465,50 +514,36 @@ def _show_startup_dialog(settings: BridgeSettings) -> BridgeSettings | None:
         current["confirmed"] = True
         root.destroy()
 
+    # ── 페어링 / 취소 액션 한 줄 (취소가 오른쪽) ──
+    def _cancel() -> None:
+        current["confirmed"] = False
+        root.destroy()
+
+    action_row = ctk.CTkFrame(pair_inputs, fg_color="transparent")
+    action_row.pack(padx=12, pady=(0, 12), fill="x")
+
     pair_btn = ctk.CTkButton(
-        pair_inputs,
-        text="페어링하고 시작",
+        action_row,
+        text="페어링 시작",
         command=_on_pair_click,
         height=36,
         font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
         fg_color="#22c55e",
         hover_color="#16a34a",
     )
-    pair_btn.pack(padx=12, pady=(0, 12))
+    pair_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-    # ── 워크스페이스 ──
-    workspace_frame = ctk.CTkFrame(root, fg_color="transparent")
-    workspace_frame.pack(padx=24, fill="x")
-    ctk.CTkLabel(workspace_frame, text="워크스페이스 폴더", width=110, anchor="w").pack(side="left")
-    path_var = ctk.StringVar(value=str(settings.workspace_root) if settings.workspace_root else "")
-    path_entry = ctk.CTkEntry(workspace_frame, textvariable=path_var, font=ctk.CTkFont(family="Consolas", size=10), height=30)
-    path_entry.pack(side="left", padx=(6, 6), fill="x", expand=True)
-
-    def _browse() -> None:
-        new = filedialog.askdirectory(title="워크스페이스 폴더 선택", initialdir=path_var.get())
-        if new:
-            path_var.set(str(Path(new).resolve()))
-
-    ctk.CTkButton(workspace_frame, text="찾기", command=_browse, width=70, height=30, fg_color="#374151", hover_color="#4b5563").pack(side="left")
-
-    # ── 취소 (페어링은 위 '페어링하고 시작' 버튼이 곧 시작 동작을 겸한다) ──
-    def _cancel() -> None:
-        current["confirmed"] = False
-        root.destroy()
-
-    button_frame = ctk.CTkFrame(root, fg_color="transparent")
-    button_frame.pack(pady=14)
-
-    ctk.CTkButton(
-        button_frame,
+    cancel_btn = ctk.CTkButton(
+        action_row,
         text="취소",
         command=_cancel,
-        width=132,
         height=36,
+        width=110,
         font=ctk.CTkFont(family="맑은 고딕", size=13),
         fg_color="#374151",
         hover_color="#4b5563",
-    ).pack()
+    )
+    cancel_btn.pack(side="right")
 
     root.protocol("WM_DELETE_WINDOW", _cancel)
     root.mainloop()
@@ -531,7 +566,24 @@ def _paired_status_text(settings: BridgeSettings) -> str:
     return "아직 페어링되지 않았습니다. 아래에 6자리 코드와 디바이스 이름을 입력하세요."
 
 
+def _sandbox_supported() -> bool:
+    """현재 OS 에서 AppContainer 가 동작 가능한지 빠르게 확인. 실제 SID 생성은 워커 spawn 시점에 시도."""
+
+    try:
+        from bridge import sandbox
+        return sandbox.status_summary().get("supported", False)
+    except Exception:
+        logger.exception("샌드박스 지원 여부 확인 실패 (UI 라벨용)")
+        return False
+
+
 def main() -> int:
+    # 동일 .exe 가 자기 자신을 AppContainer 워커로 재실행할 때 진입한다 (--sandbox-worker).
+    # 이 분기는 GUI/로깅 초기화 전에 처리해야 한다 (워커는 stdin/stdout 만 쓰는 헤드리스 프로세스).
+    if "--sandbox-worker" in sys.argv[1:]:
+        from bridge import sandbox_worker
+        return sandbox_worker.main()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
