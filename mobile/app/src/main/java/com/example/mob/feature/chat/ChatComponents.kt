@@ -1,10 +1,18 @@
 package com.example.mob.feature.chat
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Log
+import java.util.Locale
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
@@ -19,10 +27,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -31,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,15 +50,18 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.mob.BuildConfig
 import com.example.mob.ui.theme.*
+import com.example.mob.voice.WakeWordForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -618,65 +629,243 @@ private fun RecordingWaveform(amplitude: Float) {
     }
 }
 
+/**
+ * 풀스크린 음성 입력 오버레이.
+ * - 화면 전체를 어둡게 덮음 (푸터 위 포함)
+ * - 시스템 SpeechRecognizer로 한국어 실시간 인식
+ *   · onPartialResults: 진행 중인 부분 텍스트
+ *   · onResults: 한 발화 완료, finalText에 누적 후 다음 세션 재시작
+ *   · onError: ERROR_NO_MATCH / TIMEOUT 등은 정상 — 재시작
+ * - onRmsChanged 값으로 큰 웨이브바를 구동 (입력 음량에 따라 움직임)
+ * - 전송 버튼: 현재까지 누적된 텍스트(final + partial)를 onSend로 즉시 전달
+ * - 중단 버튼: 그냥 닫음
+ * - 진입 시 WakeWordForegroundService를 일시중단(마이크 자원 회피), 닫힐 때 재개
+ *
+ * @param bottomInset 시스템 네비 인셋 (버튼이 푸터/시스템바에 가려지지 않도록)
+ */
 @Composable
-fun VoiceModeOverlay(onStop: () -> Unit) {
-    val transition = rememberInfiniteTransition(label = "voice")
-    var isSpeaking by remember { mutableStateOf(false) }
-    var isMicOn by remember { mutableStateOf(true) }
+fun VoiceCaptureOverlay(
+    bottomInset: Dp,
+    onSend: (String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val context = LocalContext.current
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(3000)
-            isSpeaking = !isSpeaking
+    var amplitude by remember { mutableStateOf(0f) }
+    var isPreparing by remember { mutableStateOf(true) }
+    var statusMessage by remember { mutableStateOf<String?>(null) }
+    var finalText by remember { mutableStateOf("") }
+    var partialText by remember { mutableStateOf("") }
+
+    val recognizerRef = remember { mutableStateOf<SpeechRecognizer?>(null) }
+    // 세션이 활성 상태인지 (false면 onResults/onError 시 재시작 안 함)
+    val sessionActive = remember { mutableStateOf(true) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    // ─── 한 사이클의 startListening ───────────────────────────────────────
+    val startRecognizing: () -> Unit = startFn@{
+        val recognizer = recognizerRef.value ?: return@startFn
+        val intent =
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.KOREAN.toLanguageTag())
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+            }
+        try {
+            recognizer.startListening(intent)
+            Log.d("VoiceOverlay", "SpeechRecognizer startListening")
+        } catch (e: Exception) {
+            Log.e("VoiceOverlay", "startListening 실패: ${e.message}", e)
+            statusMessage = "음성 인식을 시작할 수 없습니다"
         }
     }
 
-    val pulse1 =
-        transition.animateFloat(
-            0.88f,
-            1.12f,
-            infiniteRepeatable(tween(1000, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-            label = "p1",
-        )
-    val pulse2 =
-        transition.animateFloat(
-            0.75f,
-            1.25f,
-            infiniteRepeatable(tween(1400, delayMillis = 200, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-            label = "p2",
-        )
-    val pulse3 =
-        transition.animateFloat(
-            0.65f,
-            1.38f,
-            infiniteRepeatable(tween(1800, delayMillis = 400, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-            label = "p3",
-        )
+    // ─── 초기화 ──────────────────────────────────────────────────────────
+    LaunchedEffect(Unit) {
+        Log.d("VoiceOverlay", "오버레이 진입 — 웨이크 워드 일시중단")
+        WakeWordForegroundService.pauseListening(context)
+        // 웨이크 워드의 SpeechRecognizer가 destroy되어 마이크가 풀릴 시간 확보
+        delay(350)
 
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            statusMessage = "이 기기는 음성 인식을 지원하지 않습니다"
+            isPreparing = false
+            return@LaunchedEffect
+        }
+
+        val hasMicPerm =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        if (!hasMicPerm) {
+            statusMessage = "마이크 권한이 없습니다"
+            isPreparing = false
+            return@LaunchedEffect
+        }
+
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        recognizer.setRecognitionListener(
+            object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    Log.d("VoiceOverlay", "onReadyForSpeech")
+                    isPreparing = false
+                    statusMessage = null
+                }
+
+                override fun onBeginningOfSpeech() {
+                    Log.d("VoiceOverlay", "onBeginningOfSpeech")
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {
+                    // rmsDb는 대략 -2 ~ 10 dB 범위. 0..1로 정규화.
+                    amplitude = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+                }
+
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+
+                override fun onEndOfSpeech() {
+                    Log.d("VoiceOverlay", "onEndOfSpeech")
+                    amplitude = 0f
+                }
+
+                override fun onError(error: Int) {
+                    Log.w("VoiceOverlay", "Recognizer error: ${errorName(error)}")
+                    amplitude = 0f
+                    if (!sessionActive.value) return
+                    // NO_MATCH / TIMEOUT / CLIENT 등은 정상적인 끊김 — 재시작
+                    when (error) {
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                            mainHandler.postDelayed({ startRecognizing() }, 400)
+                        }
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                            statusMessage = "마이크 권한이 없습니다"
+                        }
+                        SpeechRecognizer.ERROR_NETWORK,
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                        -> {
+                            statusMessage = "네트워크 오류 — 다시 시도해 주세요"
+                            mainHandler.postDelayed({
+                                statusMessage = null
+                                startRecognizing()
+                            }, 1500)
+                        }
+                        else -> {
+                            mainHandler.postDelayed({ startRecognizing() }, 250)
+                        }
+                    }
+                }
+
+                override fun onResults(results: Bundle?) {
+                    val matches =
+                        results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+                    val best = matches.firstOrNull().orEmpty().trim()
+                    Log.d("VoiceOverlay", "onResults: '$best'")
+                    if (best.isNotEmpty()) {
+                        finalText =
+                            if (finalText.isEmpty()) best else "$finalText $best"
+                    }
+                    partialText = ""
+                    amplitude = 0f
+                    if (sessionActive.value) {
+                        mainHandler.postDelayed({ startRecognizing() }, 150)
+                    }
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches =
+                        partialResults
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            .orEmpty()
+                    partialText = matches.firstOrNull().orEmpty()
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+            },
+        )
+        recognizerRef.value = recognizer
+        startRecognizing()
+    }
+
+    // ─── 정리 ────────────────────────────────────────────────────────────
+    DisposableEffect(Unit) {
+        onDispose {
+            sessionActive.value = false
+            mainHandler.removeCallbacksAndMessages(null)
+            try { recognizerRef.value?.cancel() } catch (_: Exception) {}
+            try { recognizerRef.value?.destroy() } catch (_: Exception) {}
+            recognizerRef.value = null
+            WakeWordForegroundService.resumeListening(context)
+            Log.d("VoiceOverlay", "오버레이 종료 — 웨이크 워드 재개")
+        }
+    }
+
+    // ─── 버튼 핸들러 ─────────────────────────────────────────────────────
+    val handleSend: () -> Unit = handle@{
+        val combined = (finalText + " " + partialText).trim()
+        Log.d("VoiceOverlay", "전송 탭 — final='$finalText' partial='$partialText' combined='$combined'")
+        if (combined.isBlank()) {
+            statusMessage = "음성을 인식하지 못했습니다. 다시 말씀해 주세요."
+            return@handle
+        }
+        sessionActive.value = false
+        mainHandler.removeCallbacksAndMessages(null)
+        try { recognizerRef.value?.cancel() } catch (_: Exception) {}
+        onSend(combined)
+    }
+
+    val handleCancel: () -> Unit = { onCancel() }
+
+    // ─── UI ──────────────────────────────────────────────────────────────
     Box(
         modifier =
             Modifier
                 .fillMaxSize()
                 .background(Color.Black),
-        contentAlignment = Alignment.Center,
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.offset(y = (-48).dp),
-        ) {
-            Canvas(modifier = Modifier.size(200.dp)) {
-                val base = 44.dp.toPx()
-                drawCircle(NavyPrimary.copy(alpha = 0.12f), base * 2.2f * pulse3.value)
-                drawCircle(NavyPrimary.copy(alpha = 0.22f), base * 1.75f * pulse2.value)
-                drawCircle(NavyPrimary.copy(alpha = 0.38f), base * 1.35f * pulse1.value)
-                drawCircle(NavyPrimary, base)
+        if (isPreparing) {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.size(48.dp),
+                )
+                Spacer(Modifier.height(20.dp))
+                Text("준비 중...", color = Color.White.copy(alpha = 0.85f), fontSize = 16.sp)
             }
-            Spacer(Modifier.height(28.dp))
+        } else {
+            BigVolumeWaveBar(
+                amplitude = amplitude,
+                modifier =
+                    Modifier
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .padding(horizontal = 32.dp)
+                        .height(180.dp),
+            )
+
+            // 인식 텍스트 미리보기 (final + partial)
+            val transcript = (finalText + " " + partialText).trim()
             Text(
-                if (isSpeaking) "말하는 중..." else "듣는 중...",
-                color = Color.White,
-                fontSize = 18.sp,
+                if (statusMessage != null) statusMessage!!
+                else if (transcript.isNotBlank()) transcript
+                else "말씀해 주세요...",
+                color =
+                    when {
+                        statusMessage != null -> HealthRed.copy(alpha = 0.95f)
+                        transcript.isNotBlank() -> Color.White
+                        else -> Color.White.copy(alpha = 0.6f)
+                    },
+                fontSize = if (statusMessage != null) 15.sp else 17.sp,
                 fontWeight = FontWeight.Medium,
+                modifier =
+                    Modifier
+                        .align(Alignment.Center)
+                        .offset(y = 150.dp)
+                        .padding(horizontal = 24.dp),
             )
         }
 
@@ -684,43 +873,113 @@ fun VoiceModeOverlay(onStop: () -> Unit) {
             modifier =
                 Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 72.dp),
-            horizontalArrangement = Arrangement.spacedBy(40.dp),
+                    .padding(bottom = bottomInset + 56.dp),
+            horizontalArrangement = Arrangement.spacedBy(48.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                modifier =
-                    Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(if (isMicOn) Color.White.copy(alpha = 0.15f) else HealthRed)
-                        .clickable { isMicOn = !isMicOn },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    if (isMicOn) Icons.Default.Mic else Icons.Default.MicOff,
-                    contentDescription = if (isMicOn) "마이크 끄기" else "마이크 켜기",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp),
-                )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier =
+                        Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(HealthRed)
+                            .clickable { handleCancel() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "중단",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("중단", color = Color.White, fontSize = 13.sp)
             }
 
-            Box(
-                modifier =
-                    Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(HealthRed)
-                        .clickable { onStop() },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Default.CallEnd,
-                    contentDescription = "종료",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp),
-                )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier =
+                        Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(NavyPrimary)
+                            .clickable { handleSend() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "전송",
+                        tint = Color.White,
+                        modifier = Modifier.size(30.dp),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("전송", color = Color.White, fontSize = 13.sp)
             }
+        }
+    }
+}
+
+private fun errorName(error: Int): String =
+    when (error) {
+        SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
+        SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+        SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+        SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+        SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
+        else -> "UNKNOWN($error)"
+    }
+
+@Composable
+private fun BigVolumeWaveBar(
+    amplitude: Float,
+    modifier: Modifier = Modifier,
+) {
+    val barCount = 19
+    val multipliers =
+        remember {
+            val center = (barCount - 1) / 2f
+            (0 until barCount).map { i ->
+                val dist = kotlin.math.abs(i - center) / center
+                (1f - dist * 0.55f).coerceIn(0.35f, 1f)
+            }
+        }
+
+    val animatedAmps =
+        multipliers.mapIndexed { i, mult ->
+            val jitter = if (amplitude > 0.05f) ((i * 37) % 17) / 60f else 0f
+            val target = (amplitude * mult + jitter).coerceIn(0.04f, 1f)
+            animateFloatAsState(
+                targetValue = target,
+                animationSpec = spring(dampingRatio = 0.5f, stiffness = 320f),
+                label = "amp$i",
+            ).value
+        }
+
+    Canvas(modifier = modifier) {
+        val barW = 10.dp.toPx()
+        val gap = 8.dp.toPx()
+        val total = barCount * barW + (barCount - 1) * gap
+        val startX = (size.width - total) / 2f
+        val centerY = size.height / 2f
+        val maxH = size.height
+
+        animatedAmps.forEachIndexed { i, amp ->
+            val h = (maxH * amp).coerceAtLeast(barW)
+            val x = startX + i * (barW + gap)
+            val y = centerY - h / 2f
+            drawRoundRect(
+                color = Color.White,
+                topLeft = Offset(x, y),
+                size = GeomSize(barW, h),
+                cornerRadius = CornerRadius(barW / 2f),
+            )
         }
     }
 }
