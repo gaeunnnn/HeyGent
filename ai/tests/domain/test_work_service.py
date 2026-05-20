@@ -351,6 +351,65 @@ def test_work_disposition_from_task_result_updates_work_status():
     assert repository.comments[-1].metadata["reason"] == "work_disposition_metadata"
 
 
+def test_workflow_child_completed_with_review_disposition_marks_child_done():
+    repository = FakeWorkRepository()
+    service = WorkService(repository)
+    parent = service.create_from_payload(
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        client_request_id=None,
+        payload={"rawUserInput": "워크플로우 root"},
+    )
+    child = service.create_from_payload(
+        session_id="session-1",
+        owner_key="7",
+        owner_user_id=7,
+        client_request_id=None,
+        payload={
+            "rawUserInput": "삼성 관련 조사",
+            "parentId": parent.work_id,
+            "assigneeAgentId": "agent-research",
+            "metadata": {"workflowSlotKey": "research"},
+        },
+    )
+    service.mark_run_started(work_id=child.work_id, task_run_id="task-child")
+
+    updated = service.apply_task_result(
+        work_id=child.work_id,
+        task=TaskRun(
+            task_run_id="task-child",
+            task_type="agent.loop",
+            owner_key="7",
+            status="COMPLETED",
+            input_payload={
+                "workId": child.work_id,
+                "workflowRole": "child",
+                "workflowExecution": {
+                    "mode": "strict_reuse_children",
+                    "role": "child",
+                    "rootWorkId": parent.work_id,
+                    "childWorkId": child.work_id,
+                    "parentWorkId": parent.work_id,
+                },
+            },
+            result_payload={
+                "workDisposition": {
+                    "status": "in_review",
+                    "summary": "조사 결과를 부모에게 전달",
+                }
+            },
+        ),
+    )
+
+    assert updated is not None
+    assert updated.status == "done"
+    assert repository.items[child.work_id].active_run_id is None
+    assert repository.runs[(child.work_id, "task-child")].status == "COMPLETED"
+    assert repository.comments[-1].metadata["status"] == "done"
+    assert "조사 결과를 부모에게 전달" in repository.comments[-1].body
+
+
 def test_linked_task_result_claims_work_from_disposition_work_id():
     repository = FakeWorkRepository()
     service = WorkService(repository)

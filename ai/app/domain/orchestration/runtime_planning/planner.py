@@ -35,13 +35,18 @@ class Planner:
                 operation_templates=handler.spec.operation_templates,
             )
         )
+        title = (
+            task_plan.title
+            if task_plan is not None and task_plan.title
+            else self._initial_task_title(input_payload=input_payload, handler=handler)
+        )
         return TaskRun(
             task_run_id=task_run_id or new_id("task"),
             task_type=handler.spec.task_type,
             owner_key=owner_key,
             session_key=session_key,
             status="PENDING",
-            title=task_plan.title if task_plan is not None and task_plan.title else handler.spec.task_title,
+            title=title,
             input_payload=input_payload,
             todo_state=build_task_todo_payload(initial_todo_state),
         )
@@ -62,7 +67,7 @@ class Planner:
         이후 LLM 응답, tool call, 하위 에이전트 실행을 같은 실행 anchor에 누적하게 한다.
         """
 
-        title = str(handler.spec.step_title or task.title or handler.spec.task_title or "에이전트 실행").strip()
+        title = self._initial_step_title(task=task, handler=handler, input_payload=input_payload)
         goal = str(handler.spec.semantic_goal or title).strip()
         semantic_key = self._handler_semantic_key(handler, fallback=handler.spec.step_type)
         step = StepRun(
@@ -123,6 +128,63 @@ class Planner:
     def _normalized_input_payload(*, input_payload: dict, handler: TaskHandler) -> dict:
         _ = handler
         return dict(input_payload or {})
+
+    @classmethod
+    def _initial_task_title(cls, *, input_payload: dict, handler: TaskHandler) -> str:
+        if handler.spec.task_type == "agent.loop":
+            return (
+                cls._input_payload_title(input_payload)
+                or cls._compact_title(input_payload.get("prompt"))
+                or str(handler.spec.task_title or "에이전트 요청").strip()
+            )
+        return str(
+            handler.spec.task_title or cls._input_payload_title(input_payload) or "작업"
+        ).strip()
+
+    @classmethod
+    def _initial_step_title(cls, *, task: TaskRun, handler: TaskHandler, input_payload: dict) -> str:
+        if handler.spec.task_type == "agent.loop":
+            return (
+                cls._input_payload_title(input_payload)
+                or cls._non_internal_title(task.title)
+                or cls._compact_title(input_payload.get("prompt"))
+                or str(handler.spec.step_title or handler.spec.task_title or "에이전트 실행").strip()
+            )
+        return str(
+            handler.spec.step_title or task.title or handler.spec.task_title or "에이전트 실행"
+        ).strip()
+
+    @classmethod
+    def _input_payload_title(cls, input_payload: dict) -> str | None:
+        work_context = input_payload.get("workContext") or input_payload.get("work_context")
+        if isinstance(work_context, dict):
+            title = cls._compact_title(work_context.get("title"))
+            if title:
+                return title
+        for key in ("workTitle", "work_title", "title"):
+            title = cls._compact_title(input_payload.get(key))
+            if title:
+                return title
+        return None
+
+    @staticmethod
+    def _non_internal_title(value) -> str | None:
+        title = Planner._compact_title(value)
+        if not title:
+            return None
+        normalized = title.lower().replace(" ", ".").replace("_", ".").replace("-", ".")
+        if normalized == "agent.loop" or normalized.startswith("agent.loop."):
+            return None
+        return title
+
+    @staticmethod
+    def _compact_title(value, *, limit: int = 120) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = " ".join(value.split())
+        if not text:
+            return None
+        return text[:limit]
 
     @staticmethod
     def _handler_semantic_key(handler: TaskHandler, *, fallback: str | None = None) -> str:

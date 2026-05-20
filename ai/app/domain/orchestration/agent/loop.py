@@ -945,6 +945,16 @@ class TaskEngine:
                     "ok": False,
                     "error": {"code": "child_work_not_found", "message": "child work was not found"},
                 }
+            parent_input = dict(task.input_payload or {})
+            workflow_execution = parent_input.get("workflowExecution") or parent_input.get("workflow_execution")
+            workflow_event_payload = {}
+            if isinstance(workflow_execution, dict):
+                workflow_event_payload = {
+                    "workflowExecutionMode": workflow_execution.get("mode"),
+                    "workflowRole": "child",
+                    "rootWorkId": workflow_execution.get("rootWorkId") or workflow_execution.get("root_work_id") or work.parent_id,
+                    "parentWorkId": work.parent_id,
+                }
 
             task_run_id = new_id("task")
             service = WorkService(self.work_repository)
@@ -976,6 +986,7 @@ class TaskEngine:
                         "taskRunStatus": child_task.status,
                         "workStatus": "in_progress",
                         "status": child_task.status,
+                        **workflow_event_payload,
                     },
                     summary_message=f"{work.identifier} 세션 에이전트 실행 중",
                 )
@@ -1002,6 +1013,7 @@ class TaskEngine:
                         "taskRunStatus": "FAILED",
                         "workStatus": failed_work.status,
                         "status": "FAILED",
+                        **workflow_event_payload,
                     },
                     summary_message=f"{work.identifier} 세션 에이전트 실행 실패",
                 )
@@ -1035,6 +1047,7 @@ class TaskEngine:
                     "taskRunStatus": child_status,
                     "workStatus": final_work.status,
                     "status": child_status,
+                    **workflow_event_payload,
                 },
                 summary_message=f"{work.identifier} 세션 에이전트 실행 완료",
             )
@@ -1069,11 +1082,83 @@ class TaskEngine:
             "max_iterations": self._work_execution_max_iterations(),
             "parentWorkId": work.parent_id,
         }
+        workflow_execution = parent_input.get("workflowExecution") or parent_input.get("workflow_execution")
+        if isinstance(workflow_execution, dict):
+            payload["workflowExecution"] = {
+                **workflow_execution,
+                "role": "child",
+                "childWorkId": work.work_id,
+                "parentWorkId": work.parent_id,
+                "rootWorkId": workflow_execution.get("rootWorkId") or workflow_execution.get("root_work_id") or work.parent_id,
+            }
+            payload["workflowRole"] = "child"
+            payload["rootWorkId"] = payload["workflowExecution"]["rootWorkId"]
+            predecessor_results = self._workflow_predecessor_results(work)
+            if predecessor_results:
+                payload["workflowPredecessorResults"] = predecessor_results
+                payload["prompt"] = self._append_workflow_predecessor_results(
+                    prompt=str(payload.get("prompt") or ""),
+                    predecessor_results=predecessor_results,
+                )
         self._attach_session_agent_profile(payload, work=work)
         transcript_session_id = self._create_work_transcript_session(parent_task=parent_task, work=work, model=payload.get("model"))
         if transcript_session_id:
             payload["transcript_session_id"] = transcript_session_id
         return payload
+
+    def _workflow_predecessor_results(self, work) -> list[dict]:
+        if self.work_repository is None:
+            return []
+        list_relations = getattr(self.work_repository, "list_relations", None)
+        if not callable(list_relations):
+            return []
+        results: list[dict] = []
+        seen_work_ids: set[str] = set()
+        for relation in list_relations(work.work_id):
+            if relation.relation_type != "blocks" or relation.target_work_id != work.work_id:
+                continue
+            predecessor_work_id = str(relation.source_work_id or "").strip()
+            if not predecessor_work_id or predecessor_work_id in seen_work_ids:
+                continue
+            predecessor = self.work_repository.get_work(predecessor_work_id)
+            if predecessor is None:
+                continue
+            latest_run_id = str(getattr(predecessor, "latest_run_id", "") or "").strip()
+            if not latest_run_id:
+                continue
+            predecessor_task = self.repository.get_task(latest_run_id)
+            if predecessor_task is None:
+                continue
+            summary = self._session_agent_work_tool_content(work=predecessor, task=predecessor_task).strip()
+            if not summary:
+                continue
+            seen_work_ids.add(predecessor_work_id)
+            results.append(
+                {
+                    "workId": predecessor.work_id,
+                    "identifier": predecessor.identifier,
+                    "title": predecessor.title,
+                    "status": predecessor.status,
+                    "taskRunId": predecessor_task.task_run_id,
+                    "taskStatus": self._task_status_value(predecessor_task.status),
+                    "summary": summary[:6000],
+                }
+            )
+        return results
+
+    @staticmethod
+    def _append_workflow_predecessor_results(*, prompt: str, predecessor_results: list[dict]) -> str:
+        lines = [prompt.strip(), "", "## 선행 하위 작업 결과"]
+        for index, result in enumerate(predecessor_results, start=1):
+            title = str(result.get("title") or "").strip()
+            identifier = str(result.get("identifier") or "").strip()
+            summary = str(result.get("summary") or "").strip()
+            heading = f"{index}. {identifier} {title}".strip()
+            lines.append(heading)
+            lines.append(summary)
+        lines.append("")
+        lines.append("위 선행 하위 작업 결과를 입력 자료로 사용해 현재 하위 작업을 완료하세요.")
+        return "\n".join(line for line in lines if line is not None).strip()
 
     def _attach_session_agent_profile(self, payload: dict, *, work) -> None:
         if self.agent_repository is None:

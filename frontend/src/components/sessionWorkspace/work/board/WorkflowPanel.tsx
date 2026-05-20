@@ -1,7 +1,11 @@
 import { useMemo } from 'react'
 import { Bot, UserRound } from 'lucide-react'
 import { useSessionStore } from '@/store/useSessionStore'
-import { agentProfilesToPanelItems, createDefaultSessionAgents } from '@/apis/agents'
+import {
+  agentProfilesToPanelItems,
+  createDefaultSessionAgents,
+  createSessionAgentFromTemplate,
+} from '@/apis/agents'
 import { useAgentCacheStore } from '@/store/useAgentCacheStore'
 import type { BoardAssignee } from './issueBoardPanelTypes'
 import { WorkflowTemplateEditor } from './WorkflowTemplateEditor'
@@ -54,12 +58,31 @@ export function WorkflowPanel({ sessionId }: { sessionId: string }) {
     ]
   }
 
+  const ensureProvidedFlowAgent = async (templateKey: string): Promise<BoardAssignee[]> => {
+    await createSessionAgentFromTemplate(sessionId, templateKey)
+    useAgentCacheStore.getState().invalidateSessionAgents(sessionId)
+    const profiles = await useAgentCacheStore.getState().fetchSessionAgents(sessionId)
+    const panels = agentProfilesToPanelItems(profiles)
+    setAgentPanelsForSession(sessionId, panels)
+    return [
+      MAIN_AGENT_ASSIGNEE,
+      ...panels.map((panel) => ({
+        id: panel.id,
+        name: panel.agent.name,
+        icon: Bot,
+        templateKey: panel.agent.templateKey,
+        imageUrl: panel.agent.profileImage ?? null,
+      })),
+    ]
+  }
+
   return (
     <div className="bg-background flex h-full min-h-0 w-full flex-col">
       <WorkflowTemplateEditor
         assignees={assignees}
         sessionId={sessionId}
         onEnsureDefaultAgents={ensureDefaultFlowAgents}
+        onEnsureProvidedAgent={ensureProvidedFlowAgent}
       />
     </div>
   )

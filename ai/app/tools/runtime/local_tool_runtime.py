@@ -1000,6 +1000,17 @@ class LocalToolRuntime:
         title = str(args.get("title") or "").strip()
         instruction = str(args.get("instruction") or "").strip()
         description = str(args.get("description") or instruction or title).strip()
+        workflow_execution = self._strict_workflow_execution(context)
+        if workflow_execution is not None:
+            return self._session_agent_existing_work_task(
+                args=args,
+                context=context,
+                parent=parent,
+                workflow_execution=workflow_execution,
+                title=title,
+                instruction=instruction,
+                description=description,
+            )
         required_skill_names = self._required_session_agent_skill_names(
             args=args,
             context=context,
@@ -1118,6 +1129,256 @@ class LocalToolRuntime:
             "reused": existing_child is not None,
             "startExecution": existing_child is None,
         }
+
+    def _session_agent_existing_work_task(
+        self,
+        *,
+        args: dict[str, Any],
+        context: dict[str, Any],
+        parent,
+        workflow_execution: dict[str, Any],
+        title: str,
+        instruction: str,
+        description: str,
+    ) -> dict[str, Any]:
+        """워크플로우 strict 모드에서는 이미 생성된 child WorkItem만 실행한다."""
+
+        child = self._resolve_strict_workflow_child(parent=parent, workflow_execution=workflow_execution, args=args)
+        if isinstance(child, dict):
+            return child
+        blocking_error = self._strict_workflow_child_blocking_error(child)
+        if blocking_error is not None:
+            return blocking_error
+        if child.status in {"done", "cancelled"}:
+            return self._tool_error(
+                code="workflow_child_already_terminal",
+                message="selected workflow child work is already terminal",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "childWorkId": child.work_id,
+                    "status": child.status,
+                    "allowedChildren": self._strict_workflow_allowed_children(parent=parent, workflow_execution=workflow_execution),
+                },
+            )
+
+        required_skill_names = self._required_session_agent_skill_names(
+            args=args,
+            context=context,
+            text_parts=[
+                title or child.title,
+                instruction or child.execution_instruction or "",
+                description or child.description or "",
+                self._optional_text(args.get("expectedDeliverable") or args.get("expected_deliverable")) or "",
+            ],
+        )
+        profile = self._resolve_session_agent_profile(
+            session_id=parent.session_id,
+            owner_key=parent.owner_key,
+            assignee_agent_id=child.assignee_agent_id,
+            assignee_hint=self._optional_text(args.get("assigneeHint") or args.get("assignee_hint")),
+            required_skill_names=required_skill_names,
+        )
+        if profile is None:
+            return self._tool_error(
+                code="session_agent_not_found",
+                message="no available session agent was found for this workflow child work",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "childWorkId": child.work_id,
+                    "allowedChildren": self._strict_workflow_allowed_children(parent=parent, workflow_execution=workflow_execution),
+                },
+            )
+        missing_skill_names = self._missing_profile_skills(profile, required_skill_names)
+        if missing_skill_names:
+            config = dict(profile.get("config_snapshot") or {})
+            profile_name = str(config.get("name") or profile.get("profile_key") or profile.get("profile_id") or "session agent")
+            profile_id = str(profile.get("profile_id") or "").strip()
+            return self._tool_error(
+                code="session_agent_capability_mismatch",
+                message=f"{profile_name} does not have required skills: {', '.join(missing_skill_names)}",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "requiredSkillNames": required_skill_names,
+                    "missingSkillNames": missing_skill_names,
+                    "agent": {
+                        "profileId": profile_id,
+                        "name": profile_name,
+                        "skills": self._profile_skill_names(profile),
+                    },
+                },
+            )
+
+        config = dict(profile.get("config_snapshot") or {})
+        profile_id = str(profile.get("profile_id") or child.assignee_agent_id or "").strip()
+        active_run_id = self._optional_text(getattr(child, "active_run_id", None))
+        return {
+            "ok": True,
+            "content": (
+                f"{child.identifier} workflow child work is already running: {child.title}"
+                if active_run_id
+                else f"{child.identifier} workflow child work accepted: {child.title}"
+            ),
+            "parent_work": self._work_tool_payload(parent),
+            "child_work": self._work_tool_payload(child),
+            "agent": {
+                "profileId": profile_id,
+                "name": str(config.get("name") or profile.get("profile_key") or profile_id),
+                "role": str(config.get("role") or profile.get("agent_type") or "user_subagent"),
+            },
+            "reused": True,
+            "startExecution": active_run_id is None,
+            "workflowExecution": {
+                "mode": "strict_reuse_children",
+                "rootWorkId": parent.work_id,
+                "childWorkIds": self._strict_workflow_child_ids(workflow_execution),
+                "childrenBySlotKey": self._strict_workflow_slot_map(workflow_execution),
+            },
+        }
+
+    def _resolve_strict_workflow_child(self, *, parent, workflow_execution: dict[str, Any], args: dict[str, Any]):
+        child_work_id = self._optional_text(args.get("childWorkId") or args.get("child_work_id"))
+        slot_key = self._optional_text(args.get("workflowSlotKey") or args.get("workflow_slot_key"))
+        slot_map = self._strict_workflow_slot_map(workflow_execution)
+        if not child_work_id and slot_key:
+            child_work_id = slot_map.get(slot_key)
+        if not child_work_id:
+            return self._tool_error(
+                code="workflow_child_reuse_required",
+                message="workflow execution must choose one of the already-created child work ids",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "allowedChildren": self._strict_workflow_allowed_children(parent=parent, workflow_execution=workflow_execution),
+                },
+            )
+        allowed_ids = set(self._strict_workflow_child_ids(workflow_execution))
+        if child_work_id not in allowed_ids:
+            return self._tool_error(
+                code="workflow_child_not_allowed",
+                message="selected child work id is not allowed in this workflow execution",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "childWorkId": child_work_id,
+                    "allowedChildren": self._strict_workflow_allowed_children(parent=parent, workflow_execution=workflow_execution),
+                },
+            )
+        child = self.work_repository.get_work(child_work_id) if self.work_repository is not None else None
+        if child is None:
+            return self._tool_error(
+                code="workflow_child_not_found",
+                message="selected workflow child work was not found",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "childWorkId": child_work_id,
+                    "allowedChildren": self._strict_workflow_allowed_children(parent=parent, workflow_execution=workflow_execution),
+                },
+            )
+        if child.parent_id != parent.work_id:
+            return self._tool_error(
+                code="workflow_child_parent_mismatch",
+                message="selected workflow child work is not under the current root work",
+                tool_name="session_agent_task",
+                details={
+                    "recoverable": True,
+                    "childWorkId": child_work_id,
+                    "rootWorkId": parent.work_id,
+                    "actualParentId": child.parent_id,
+                    "allowedChildren": self._strict_workflow_allowed_children(parent=parent, workflow_execution=workflow_execution),
+                },
+            )
+        return child
+
+    def _strict_workflow_child_blocking_error(self, child) -> dict[str, Any] | None:
+        if self.work_repository is None:
+            return None
+        list_relations = getattr(self.work_repository, "list_relations", None)
+        if not callable(list_relations):
+            return None
+        blockers: list[dict[str, Any]] = []
+        for relation in list_relations(child.work_id):
+            if relation.relation_type != "blocks" or relation.target_work_id != child.work_id:
+                continue
+            blocker = self.work_repository.get_work(relation.source_work_id)
+            if blocker is not None and not self._strict_workflow_blocker_allows_handoff(blocker):
+                blockers.append(
+                    {
+                        "workId": blocker.work_id,
+                        "identifier": blocker.identifier,
+                        "title": blocker.title,
+                        "status": blocker.status,
+                    }
+                )
+        if not blockers:
+            return None
+        return self._tool_error(
+            code="workflow_child_blocked_by_predecessor",
+            message="selected workflow child work has unfinished blockers",
+            tool_name="session_agent_task",
+            details={
+                "recoverable": True,
+                "childWorkId": child.work_id,
+                "blockers": blockers,
+            },
+        )
+
+    def _strict_workflow_blocker_allows_handoff(self, blocker) -> bool:
+        if blocker.status == "done":
+            return True
+        if blocker.active_run_id is not None or blocker.latest_run_id is None:
+            return False
+        list_runs = getattr(self.work_repository, "list_runs", None) if self.work_repository is not None else None
+        if not callable(list_runs):
+            return False
+        for run in list_runs(blocker.work_id, limit=5, offset=0):
+            if run.task_run_id == blocker.latest_run_id:
+                return run.status == "COMPLETED"
+        return False
+
+    def _strict_workflow_allowed_children(self, *, parent, workflow_execution: dict[str, Any]) -> list[dict[str, Any]]:
+        children: list[dict[str, Any]] = []
+        slot_by_work_id = {work_id: slot for slot, work_id in self._strict_workflow_slot_map(workflow_execution).items()}
+        for child_work_id in self._strict_workflow_child_ids(workflow_execution):
+            child = self.work_repository.get_work(child_work_id) if self.work_repository is not None else None
+            if child is None or child.parent_id != parent.work_id:
+                continue
+            children.append(
+                {
+                    "workId": child.work_id,
+                    "identifier": child.identifier,
+                    "title": child.title,
+                    "status": child.status,
+                    "assigneeAgentId": child.assignee_agent_id,
+                    "workflowSlotKey": slot_by_work_id.get(child.work_id),
+                }
+            )
+        return children
+
+    @staticmethod
+    def _strict_workflow_execution(context: dict[str, Any]) -> dict[str, Any] | None:
+        candidate = context.get("workflowExecution") or context.get("workflow_execution")
+        if not isinstance(candidate, dict):
+            return None
+        mode = str(candidate.get("mode") or "").strip()
+        return candidate if mode == "strict_reuse_children" else None
+
+    @staticmethod
+    def _strict_workflow_child_ids(workflow_execution: dict[str, Any]) -> list[str]:
+        raw = workflow_execution.get("childWorkIds") or workflow_execution.get("child_work_ids") or []
+        if not isinstance(raw, list):
+            return []
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    @staticmethod
+    def _strict_workflow_slot_map(workflow_execution: dict[str, Any]) -> dict[str, str]:
+        raw = workflow_execution.get("childrenBySlotKey") or workflow_execution.get("children_by_slot_key") or {}
+        if not isinstance(raw, dict):
+            return {}
+        return {str(key).strip(): str(value).strip() for key, value in raw.items() if str(key).strip() and str(value).strip()}
 
     def _create_session_agent_root_work(self, *, args: dict[str, Any], context: dict[str, Any]):
         session_id = self._optional_text(context.get("sessionId") or context.get("session_id"))

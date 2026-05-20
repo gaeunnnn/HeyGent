@@ -121,6 +121,13 @@ class WorkService:
             return self.repository.get_work(work_id)
         disposition = _extract_work_disposition(task.result_payload)
         status = normalize_disposition_status(disposition.get("status") if disposition else None)
+        if _is_workflow_child_task(task) and getattr(task.status, "value", str(task.status)) == TaskStatus.COMPLETED.value:
+            if status is None:
+                status = "done"
+                disposition = {"status": "done", "summary": "워크플로우 하위 작업 실행을 완료했습니다."}
+            elif status == "in_review":
+                status = "done"
+                disposition = {**(disposition or {}), "status": "done"}
         if status is not None:
             updated = self.repository.update_status(work_id, status)
             self.repository.add_comment(
@@ -243,6 +250,14 @@ class WorkService:
 def _extract_work_disposition(payload: dict[str, Any]) -> dict[str, Any] | None:
     candidate = payload.get("workDisposition") or payload.get("work_disposition")
     return candidate if isinstance(candidate, dict) else None
+
+
+def _is_workflow_child_task(task: TaskRun) -> bool:
+    input_payload = task.input_payload or {}
+    if input_payload.get("workflowRole") == "child" or input_payload.get("workflow_role") == "child":
+        return True
+    workflow_execution = input_payload.get("workflowExecution") or input_payload.get("workflow_execution")
+    return isinstance(workflow_execution, dict) and workflow_execution.get("role") == "child"
 
 
 def _work_id_from_task(task: TaskRun) -> str | None:

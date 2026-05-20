@@ -70,6 +70,8 @@ def _patch_respond_sequence(monkeypatch, responses: list[AgentModelResponse]) ->
     remaining = list(responses)
 
     def fake_respond(self, messages, tools, model, tool_choice=None, runtime_context=None):
+        if _is_memory_recall_planner_call(messages, tools):
+            return _model_text_response(model=model, text='{"shouldRecall":false,"reason":"test"}')
         if not remaining:
             return _model_text_response(model=model, text="SEQUENCE_EXHAUSTED")
         return remaining.pop(0)
@@ -86,6 +88,13 @@ def _patch_respond_sequence(monkeypatch, responses: list[AgentModelResponse]) ->
 
     monkeypatch.setattr("app.domain.providers.model.openai_api.OpenAIAPIProvider.respond", fake_respond)
     monkeypatch.setattr("app.domain.providers.model.openai_api.OpenAIAPIProvider.respond_async", fake_respond_async)
+
+
+def _is_memory_recall_planner_call(messages, tools) -> bool:
+    if tools is not None or not messages:
+        return False
+    first_content = str(getattr(messages[0], "content", ""))
+    return "You decide whether the AI runtime should recall long-term memory" in first_content
 
 
 def _model_text_response(*, model: str, text: str, work_disposition: dict | None = None) -> AgentModelResponse:
@@ -374,10 +383,17 @@ def test_ws_followup_message_passes_previous_public_messages_without_current_use
             {"role": "assistant", "content": "분실물 조회 경로를 확인했습니다."},
         ]
         assert "ㄴㄴ 분실물찾은거" not in str(task.input_payload["conversation_history"])
-        assert [message.role for message in provider_calls[0]["messages"][:2]] == ["user", "assistant"]
+        agent_call = next(
+            call
+            for call in provider_calls
+            if any("<conversation_history>" in str(getattr(message, "content", "")) for message in call["messages"])
+        )
+        history_prompt = "\n".join(str(getattr(message, "content", "")) for message in agent_call["messages"])
+        assert "[1] user: 강남역에서 지갑 잃어버렸어" in history_prompt
+        assert "[2] assistant: 분실물 조회 경로를 확인했습니다." in history_prompt
         current_user_count = sum(
             str(message.content).count("ㄴㄴ 분실물찾은거")
-            for message in provider_calls[0]["messages"]
+            for message in agent_call["messages"]
             if message.role == "user"
         )
         assert current_user_count == 1
@@ -487,6 +503,53 @@ def test_ws_list_snapshot_and_replay_happy_path(client, monkeypatch):
         assert replay["requestId"] == "req_replay"
         assert replay["payload"]["events"]
         assert replay["payload"]["events"][0]["task_run_id"] == task_run_id
+    finally:
+        context.__exit__(None, None, None)
+
+
+def test_ws_session_list_filters_public_sessions_before_limit(client):
+    store = client.app.state.session_store
+    owner = "ws-source-filter-owner"
+    base = utc_now()
+
+    for index in range(12):
+        session_id = f"agent_recent_{index}"
+        store.create_session(
+            session_id=session_id,
+            session_key=session_id,
+            source="agent.loop",
+            user_id=owner,
+            metadata={"source": "agent.loop"},
+        )
+        store.sessions[session_id]["updated_at"] = base + timedelta(minutes=10 + index)
+
+    public_session_ids: list[str] = []
+    for index in range(3):
+        session_id = f"public_visible_{index}"
+        store.create_session(
+            session_id=session_id,
+            session_key=session_id,
+            source="api.session",
+            user_id=owner,
+            metadata={"source": "api.session"},
+        )
+        store.sessions[session_id]["updated_at"] = base + timedelta(minutes=index)
+        public_session_ids.append(session_id)
+
+    context, websocket = _authenticated_socket(client, user_id=owner)
+    try:
+        websocket.send_json(
+            {
+                "protocolVersion": 1,
+                "type": "session.list",
+                "requestId": "req_source_filtered_sessions",
+                "payload": {"pageSize": 20},
+            }
+        )
+        sessions = _receive_command_frame(websocket, "session.list.result", "req_source_filtered_sessions")
+
+        assert [item["session_id"] for item in sessions["payload"]["items"]] == list(reversed(public_session_ids))
+        assert sessions["payload"]["total_count"] == 3
     finally:
         context.__exit__(None, None, None)
 
@@ -987,10 +1050,10 @@ def test_ws_session_retry_clears_running_guard_when_task_creation_fails(client, 
             metadata={"source": "api.session", "task_run_id": "task_old_retry_fail"},
         )
 
-        def fail_create_task(task):
-            raise RuntimeError("create_task failed")
+        def fail_create_direct_task(task):
+            raise RuntimeError("create_direct_task failed")
 
-        monkeypatch.setattr(client.app.state.repository, "create_task", fail_create_task)
+        monkeypatch.setattr(client.app.state.repository, "create_direct_task", fail_create_direct_task)
 
         websocket.send_json(
             {
@@ -1203,7 +1266,8 @@ def test_ws_session_update_clears_orphaned_running_guard(client):
             session_key="orphaned_update_session",
             status="RUNNING",
             title="멈춘 실행",
-            queue_status="running",
+            queue_status="claimed",
+            claim_owner="stale-worker",
         )
         client.app.state.repository.create_task(task)
         client.app.state.repository.tasks["task_orphaned_update"].updated_at = utc_now() - timedelta(minutes=20)

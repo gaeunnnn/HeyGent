@@ -381,6 +381,7 @@ class InMemoryTranscriptStore:
         offset: int = 0,
         include_archived: bool = False,
         include_deleted: bool = False,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
         effective_owner = owner if owner is not None else user_id
         sessions = [
@@ -388,12 +389,39 @@ class InMemoryTranscriptStore:
             for session in self.sessions.values()
             if effective_owner is None or session.get("user_id") == effective_owner
         ]
+        if source is not None:
+            sessions = [
+                session
+                for session in sessions
+                if session.get("source") == source or dict(session.get("metadata") or {}).get("source") == source
+            ]
         if not include_deleted:
             sessions = [session for session in sessions if session.get("deleted_at") is None]
         if not include_archived:
             sessions = [session for session in sessions if session.get("archived_at") is None]
         sessions.sort(key=lambda session: session["updated_at"], reverse=True)
         return deepcopy(sessions[offset : offset + limit])
+
+    def count_sessions(
+        self,
+        owner: str | None = None,
+        *,
+        user_id: str | None = None,
+        include_archived: bool = False,
+        include_deleted: bool = False,
+        source: str | None = None,
+    ) -> int:
+        return len(
+            self.list_sessions(
+                owner,
+                user_id=user_id,
+                limit=10_000_000,
+                offset=0,
+                include_archived=include_archived,
+                include_deleted=include_deleted,
+                source=source,
+            )
+        )
 
     def get_latest_session_by_key(self, session_key: str, *, owner: str | None = None) -> dict[str, Any] | None:
         sessions = [

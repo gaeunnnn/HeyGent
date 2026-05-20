@@ -77,8 +77,21 @@ class WorkflowTemplateListResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class WorkflowTemplateInstantiateChildResponse(BaseModel):
+    slot_key: str = Field(alias="slotKey")
+    work_id: str = Field(alias="workId")
+    identifier: str
+    title: str
+    assignee_agent_id: str | None = Field(default=None, alias="assigneeAgentId")
+
+    model_config = {"populate_by_name": True}
+
+
 class WorkflowTemplateInstantiateResponse(BaseModel):
-    work_ids: list[str] = Field(alias="workIds")
+    root_work_id: str = Field(alias="rootWorkId")
+    child_work_ids: list[str] = Field(alias="childWorkIds")
+    children_by_slot_key: dict[str, str] = Field(alias="childrenBySlotKey")
+    children: list[WorkflowTemplateInstantiateChildResponse]
 
     model_config = {"populate_by_name": True}
 
@@ -275,6 +288,7 @@ async def instantiate_workflow_template(
 
     # 2) 그림의 각 노드 → 자식 작업 생성
     slot_to_work_id: dict[str, str] = {}
+    children: list[WorkflowTemplateInstantiateChildResponse] = []
     for index, node in enumerate(template.graph.nodes):
         child_payload = {
             "title": node.title,
@@ -298,6 +312,15 @@ async def instantiate_workflow_template(
         )
         work_repo.update_status(child.work_id, "todo")
         slot_to_work_id[node.slot_key] = child.work_id
+        children.append(
+            WorkflowTemplateInstantiateChildResponse(
+                slotKey=node.slot_key,
+                workId=child.work_id,
+                identifier=child.identifier,
+                title=child.title,
+                assigneeAgentId=child.assignee_agent_id,
+            )
+        )
 
     # 3) 그림의 화살표 → blocks 관계
     for edge in template.graph.edges:
@@ -315,8 +338,13 @@ async def instantiate_workflow_template(
             # 같은 노드끼리 또는 중복 관계는 무시
             pass
 
-    work_ids = [root.work_id] + list(slot_to_work_id.values())
-    return WorkflowTemplateInstantiateResponse(workIds=work_ids)
+    child_work_ids = list(slot_to_work_id.values())
+    return WorkflowTemplateInstantiateResponse(
+        rootWorkId=root.work_id,
+        childWorkIds=child_work_ids,
+        childrenBySlotKey=slot_to_work_id,
+        children=children,
+    )
 
 
 def _int_or_none(value: Any) -> int | None:
