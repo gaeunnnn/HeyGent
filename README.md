@@ -222,6 +222,31 @@ HeyGent는 이 문제를 "대화형 AI"가 아니라 "AI 작업 실행 플랫폼
         <sub><b>로컬 브릿지 연결</b></sub>
       </td>
     </tr>
+    <tr>
+      <td width="33%" align="center">
+        <img src="docs/image/demo/장기기억1.gif" width="280" alt="로컬 브릿지 연결"><br/>
+        <sub><b>장기기억 chat1</b></sub>
+      </td>
+      <td width="33%" align="center">
+        <img src="docs/image/demo/장기기억2.gif" width="280" alt="로컬 브릿지 연결"><br/>
+        <sub><b>장기기억 chat2</b></sub>
+      </td>
+      <td width="33%" align="center">
+        <img src="docs/image/demo/k_agent.gif" width="280" alt="로컬 브릿지 연결"><br/>
+        <sub><b>k-agent chat</b></sub>
+      </td>
+    </tr>
+    <tr>
+      <td width="33%" align="center">
+        <img src="docs/image/demo/srt.gif" width="280" alt="로컬 브릿지 연결"><br/>
+        <sub><b>srt chat</b></sub>
+      </td>
+      <td width="33%" align="center">
+        <img src="docs/image/demo/프로젝트.gif" width="280" alt="로컬 브릿지 연결"><br/>
+        <sub><b>프로젝트 chat</b></sub>
+      </td>
+      
+    </tr>
   </table>
 
 
