@@ -52,6 +52,7 @@
   <a href="#team"><b>🔥 Team</b></a> &nbsp;&nbsp;|&nbsp;&nbsp;
   <a href="#why-heygent"><b>💬 왜 HeyGent인가</b></a> &nbsp;&nbsp;|&nbsp;&nbsp;
   <a href="#features"><b>✨ 주요 기능</b></a> &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="#video-portfolio"><b>🎥 영상 포트폴리오</b></a> &nbsp;&nbsp;|&nbsp;&nbsp;
   <a href="#structure"><b>📂 프로젝트 구조</b></a> <br><br>
   <a href="#core-pipeline"><b>⚙️ 코어 파이프라인</b></a> &nbsp;&nbsp;|&nbsp;&nbsp;
   <a href="#tech-stack"><b>🛠 기술 스택</b></a> &nbsp;&nbsp;|&nbsp;&nbsp;
@@ -245,10 +246,6 @@ HeyGent는 이 문제를 "대화형 AI"가 아니라 "AI 작업 실행 플랫폼
         <img src="docs/image/demo/모바일_앱_시연.gif" height="200" alt="모바일 앱 시연"><br/>
         <sub><b>모바일 앱 시연</b></sub>
       </td>
-      <td width="33%" align="center">
-        <img src="docs/image/demo/iot.gif" width="280" alt="iot chat"><br/>
-        <sub><b>iot chat</b></sub>
-      </td>
     </tr>
     <tr>
       <td width="33%" align="center">
@@ -261,6 +258,25 @@ HeyGent는 이 문제를 "대화형 AI"가 아니라 "AI 작업 실행 플랫폼
       </td>
     </tr>
   </table>
+
+## 🎥 영상 포트폴리오 <a id="video-portfolio"></a>
+
+---
+
+<br/>
+
+<table width="100%">
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/image/demo/iot_live_chat_mv.mp4"><b>iot device 작동 시연</b></a>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/image/demo/14기_자율PJT_영상 포트폴리오_E105.mp4"><b>영상 포트폴리오</b></a>
+    </td>
+  </tr>
+</table>
+
+<br/>
 
 
 ## 📂 프로젝트 구조 <a id="structure"></a>
